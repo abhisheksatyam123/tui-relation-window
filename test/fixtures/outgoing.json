@@ -1,0 +1,23 @@
+{
+  "mode": "outgoing",
+  "provider": "clangd-mcp",
+  "result": {
+    "main": {
+      "symbolKind": 12,
+      "calls": [
+        {
+          "callee": "parse_config",
+          "filePath": "/tmp/src/config.c",
+          "lineNumber": 25,
+          "symbolKind": 12
+        },
+        {
+          "callee": "start_workers",
+          "filePath": "/tmp/src/worker.c",
+          "lineNumber": 73,
+          "symbolKind": 12
+        }
+      ]
+    }
+  }
+}

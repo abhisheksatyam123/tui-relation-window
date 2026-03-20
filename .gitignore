@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Runtime logs and temp outputs
+logs/
+*.log
+clangd-mcp.log
+clangd-mcp-bridge.log
+
+# Local bridge/session state
+.clangd-mcp-state.json
+
+# Build artifacts
+coverage/
+dist/
+build/
+*.tsbuildinfo
+
+# OS/editor junk
+.DS_Store
+
+# Tool cache
+test/cpp_fixture/.cache/

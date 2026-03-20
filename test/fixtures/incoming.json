@@ -1,0 +1,23 @@
+{
+  "mode": "incoming",
+  "provider": "clangd-mcp",
+  "result": {
+    "main": {
+      "symbolKind": 12,
+      "calledBy": [
+        {
+          "caller": "bootstrap",
+          "filePath": "/tmp/src/bootstrap.c",
+          "lineNumber": 10,
+          "symbolKind": 12
+        },
+        {
+          "caller": "init_runtime",
+          "filePath": "/tmp/src/runtime.c",
+          "lineNumber": 42,
+          "symbolKind": 12
+        }
+      ]
+    }
+  }
+}
