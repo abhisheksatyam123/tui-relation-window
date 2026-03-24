@@ -9,6 +9,8 @@ export type SystemNodeKind =
   | 'signal'
   | 'interface'
   | 'component'
+  | 'timer'
+  | 'work_queue'
   | 'unknown';
 
 export type SystemConnectionKind =
@@ -19,6 +21,11 @@ export type SystemConnectionKind =
   | 'ring_signal'
   | 'interface_registration'
   | 'event'
+  | 'timer_callback'
+  | 'deferred_work'
+  | 'debugfs_op'
+  | 'ioctl_dispatch'
+  | 'ring_completion'
   | 'custom';
 
 export type CallerNode = {
@@ -96,6 +103,8 @@ export type BridgeIncomingMessage =
     }
   | { type: 'query_result'; payload: { requestId: string; parentId: string; result: RelationPayload } }
   | { type: 'query_error'; payload: { requestId: string; parentId: string; error: string } }
+  | { type: 'hover_result'; payload: { requestId: string; nodeId: string; hoverText: string } }
+  | { type: 'hover_error'; payload: { requestId: string; nodeId: string; error: string } }
   | { type: 'refresh' }
   | { type: 'ping' }
   | { type: 'quit' };
@@ -114,6 +123,16 @@ export type BridgeOutgoingMessage =
         lineNumber: number;
         character?: number;
         mode: QueryMode;
+      };
+    }
+  | {
+      type: 'query_hover';
+      payload: {
+        requestId: string;
+        nodeId: string;
+        filePath: string;
+        lineNumber: number;
+        character?: number;
       };
     }
   | { type: 'request_refresh' }

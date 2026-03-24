@@ -54,6 +54,12 @@ type Props = {
     lineNumber: number;
     mode: QueryMode;
   }) => Promise<FlatRelationItem[]>;
+  requestHover?: (node: {
+    id: string;
+    label: string;
+    filePath: string;
+    lineNumber: number;
+  }) => Promise<string>;
   onOpenLocation: (item: FlatRelationItem) => void;
   onRefresh: () => void;
 };
@@ -72,6 +78,7 @@ export function RelationWindow({
   incomingItems,
   outgoingItems,
   requestExpand,
+  requestHover,
   onOpenLocation,
   onRefresh,
 }: Props) {
@@ -84,6 +91,7 @@ export function RelationWindow({
         incomingItems={incomingItems}
         outgoingItems={outgoingItems}
         requestExpand={requestExpand}
+        requestHover={requestHover}
         onOpenLocation={onOpenLocation}
       />
     );
@@ -130,6 +138,7 @@ export function RelationWindow({
         filePath: item.filePath,
         lineNumber: item.lineNumber,
         symbolKind: item.symbolKind,
+        connectionKind: item.connectionKind,
         parentId: rid,
         childrenIds: [],
         loaded: false,
@@ -297,6 +306,7 @@ export function RelationWindow({
             filePath: child.filePath,
             lineNumber: child.lineNumber,
             symbolKind: child.symbolKind,
+            connectionKind: child.connectionKind,
             parentId: node.id,
             childrenIds: [],
             loaded: false,

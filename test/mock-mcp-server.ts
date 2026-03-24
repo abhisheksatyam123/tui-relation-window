@@ -81,11 +81,32 @@ function defaultToolCall(name: string, args: Record<string, unknown>): string {
     return 'function resolve_check';
   }
 
+  if (name === 'lsp_indirect_callers') {
+    return [
+      'Callers of resolve_check  (2 total: 1 direct, 1 registration-call)',
+      '',
+      'Direct callers (1):',
+      '  <- [Function] alpha_caller  at src/alpha.c:11:2',
+      '',
+      'Registration-call registrations (1):',
+      '  <- [Function] setup_handlers  at src/registrar.c:3:1',
+      '     via: register_check_handler',
+    ].join('\n');
+  }
+
   if (name === 'lsp_incoming_calls') {
     return [
       'Incoming calls:',
       '  <- [Function] alpha_caller  at src/alpha.c:11:2',
       '  <- [Function] beta_caller  at src/beta.c:22:3',
+    ].join('\n');
+  }
+
+  if (name === 'lsp_references') {
+    return [
+      'References:',
+      '  - at src/registrar.c:4:32',
+      '  - at src/thread_worker.c:3:10',
     ].join('\n');
   }
 
@@ -131,4 +152,3 @@ function closeServer(server: Server): Promise<void> {
     server.close((err) => (err ? reject(err) : resolve()));
   });
 }
-

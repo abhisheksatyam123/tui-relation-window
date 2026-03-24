@@ -38,7 +38,7 @@
  */
 
 import React from 'react';
-import type { RelationMode } from '../lib/types';
+import type { RelationMode, SystemConnectionKind } from '../lib/types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types
@@ -50,6 +50,7 @@ export type TreeNode = {
   filePath?: string;
   lineNumber?: number;
   symbolKind?: number;
+  connectionKind?: SystemConnectionKind;
   parentId?: string;
   childrenIds: string[];
   loaded: boolean;
@@ -257,14 +258,36 @@ type RelationEdgeProps = {
   mode: RelationMode;
   depth: number;
   isLast: boolean;
+  connectionKind?: SystemConnectionKind;
 };
 
-export function RelationEdge({ mode, depth, isLast }: RelationEdgeProps) {
+export function RelationEdge({ mode, depth, isLast, connectionKind }: RelationEdgeProps) {
   const indent = '  '.repeat(depth);
   const branch = isLast ? '└' : '├';
   const line   = '─'.repeat(3);
   const arrow  = mode === 'incoming' ? `${branch}${line}◀ ` : `${branch}${line}▶ `;
   const label  = mode === 'incoming' ? 'caller' : 'callee';
+
+  // Add bracket label for indirect edge types
+  let edgeLabel = '';
+  let edgeLabelColor: string = COLORS.fgDim;
+  
+  if (connectionKind === 'sw_thread_comm') {
+    edgeLabel = '[THR]';
+    edgeLabelColor = '#56b6c2'; // cyan
+  } else if (connectionKind === 'hw_interrupt') {
+    edgeLabel = '[IRQ]';
+    edgeLabelColor = '#e5c07b'; // amber
+  } else if (connectionKind === 'ring_signal' || connectionKind === 'hw_ring') {
+    edgeLabel = '[RNG]';
+    edgeLabelColor = '#c678dd'; // purple
+  } else if (connectionKind === 'event') {
+    edgeLabel = '[SIG]';
+    edgeLabelColor = '#98c379'; // green
+  } else if (connectionKind === 'custom') {
+    edgeLabel = '[IND]';
+    edgeLabelColor = '#7f8c8d'; // dim
+  }
 
   return (
     <box flexDirection="row" width="100%" marginLeft={depth * 4}>
@@ -273,6 +296,11 @@ export function RelationEdge({ mode, depth, isLast }: RelationEdgeProps) {
         {arrow}
       </text>
       <text fg={COLORS.fgDim}>{label}</text>
+      {edgeLabel && (
+        <text fg={edgeLabelColor} marginLeft={1}>
+          {edgeLabel}
+        </text>
+      )}
     </box>
   );
 }
@@ -416,6 +444,7 @@ export function RelationTree({
       {/* Children (only when expanded) */}
       {node.expanded && node.childrenIds.map((childId, idx) => {
         const isLast = idx === node.childrenIds.length - 1;
+        const childNode = nodes[childId];
         return (
           <box key={childId} flexDirection="column" width="100%">
             {/* Edge connector */}
@@ -423,6 +452,7 @@ export function RelationTree({
               mode={mode}
               depth={depth + 1}
               isLast={isLast}
+              connectionKind={childNode?.connectionKind}
             />
             {/* Recursive child */}
             <RelationTree

@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { doctorClangdMcp, fetchRelationsFromClangdMcp, normaliseWorkspaceRoot } from './lib/clangd-mcp-client';
+import { clearWorkspaceCache, getCacheStats } from './lib/relation-cache';
 import type { BackendMode, BackendQuery } from './lib/backend-types';
 import { getLogDir, logError, logInfo } from './lib/logger';
 
@@ -56,7 +57,47 @@ function parseArgs(argv: string[]): BackendQuery {
 }
 
 async function main() {
+  const clearCacheMode = Bun.argv.includes('--clear-cache');
+  const cacheStatsMode = Bun.argv.includes('--cache-stats');
   const doctorMode = Bun.argv.includes('--doctor');
+  
+  // Handle cache management commands
+  if (clearCacheMode || cacheStatsMode) {
+    const args = new Map<string, string>();
+    for (let i = 0; i < Bun.argv.length; i += 1) {
+      const current = Bun.argv[i];
+      if (!current.startsWith('--')) continue;
+      const key = current.slice(2);
+      const value = Bun.argv[i + 1];
+      if (!value || value.startsWith('--')) {
+        args.set(key, 'true');
+        continue;
+      }
+      args.set(key, value);
+      i += 1;
+    }
+    
+    const workspaceRoot = args.get('workspace-root');
+    if (!workspaceRoot) {
+      throw new Error('--workspace-root required for cache operations');
+    }
+    const normalized = normaliseWorkspaceRoot(workspaceRoot);
+    
+    if (clearCacheMode) {
+      clearWorkspaceCache(normalized);
+      logInfo('backend', 'cache cleared', { workspaceRoot: normalized });
+      process.stdout.write(JSON.stringify({ success: true, message: 'Cache cleared', workspaceRoot: normalized }) + '\n');
+      return;
+    }
+    
+    if (cacheStatsMode) {
+      const stats = getCacheStats(normalized);
+      logInfo('backend', 'cache stats', { workspaceRoot: normalized, stats });
+      process.stdout.write(JSON.stringify({ success: true, stats, workspaceRoot: normalized }) + '\n');
+      return;
+    }
+  }
+  
   const query = parseArgs(Bun.argv.slice(2));
   logInfo('backend', 'backend query start', { logDir: getLogDir(), query });
   if (doctorMode) {

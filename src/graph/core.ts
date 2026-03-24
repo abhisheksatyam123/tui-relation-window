@@ -1,7 +1,7 @@
-import type { FlatRelationItem } from '../lib/types';
+import type { FlatRelationItem, SystemConnectionKind } from '../lib/types';
 
 export type Direction = 'incoming' | 'outgoing';
-export type EdgeKind = 'api_call' | 'interface_registration';
+export type EdgeKind = SystemConnectionKind;
 
 export type NodeInstance = {
   id: string;
@@ -135,7 +135,7 @@ export function addChildrenForDirection(
       filePath: item.filePath,
       lineNumber: item.lineNumber,
       symbolKind: item.symbolKind,
-      edgeKindFromParent: item.connectionKind === 'interface_registration' ? 'interface_registration' : 'api_call',
+      edgeKindFromParent: item.connectionKind ?? 'api_call',
     };
     appendedIds.push(nodeId);
     nextParentByNode[nodeId] = effectiveParentId;

@@ -135,7 +135,7 @@ export function buildLayout(graph: GraphState): GraphLayout {
         edgeCol: Math.min(fromNode.nodeCol, toNode.nodeCol),
         fromRow: fromNode.row,
         toRow: toNode.row,
-        kind: graph.nodes[edge.toId]?.edgeKindFromParent === 'interface_registration' ? 'interface_registration' : 'api_call',
+        kind: graph.nodes[edge.toId]?.edgeKindFromParent ?? 'api_call',
       });
     }
   };
@@ -169,6 +169,12 @@ export function fitWidth(text: string, width: number): string {
 export function mergeEdgeChar(current: string | undefined, next: string): string {
   if (!current) return next;
   if (current === next) return current;
+  
+  // Preserve 3-char labels (IRQ, RNG, THR, SIG, IND) over line-drawing chars
+  const isLabel = (s: string) => s.length === 3 && /^[A-Z]{3}$/.test(s);
+  if (isLabel(current)) return current;
+  if (isLabel(next)) return next;
+  
   if (current === '◀' || current === '▶') return current;
   if (next === '◀' || next === '▶') return next;
   if (

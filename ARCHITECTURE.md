@@ -1,1 +1,0 @@
-/local/mnt/workspace/notes/tui-relation-window/ARCHITECTURE.md

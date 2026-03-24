@@ -12,6 +12,7 @@
     "test:integration": "bun test src/lib/clangd-mcp-client.integration.test.ts src/backend.contract.test.ts",
     "test:fixtures": "bun test src/lib/relation.test.ts",
     "test:mcp": "bun test/mcp-smoke.ts",
+    "test:indirect-scorecard": "bun test/live-indirect-scorecard.ts",
     "test:connectivity": "bun test/test-mcp-connectivity.ts",
     "test:e2e": "bun test/test-tui-e2e.ts",
     "test:comprehensive": "bun run typecheck && bun test && bun run test:connectivity && bun run test:e2e"

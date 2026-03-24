@@ -47,29 +47,44 @@ function mergeFlatItems(base: FlatRelationItem[], extra: FlatRelationItem[]): Fl
   return out;
 }
 
-function inferCharacter(filePath: string, lineNumber: number, label: string): number {
+function inferSourcePoint(filePath: string, lineNumber: number, label: string): { lineNumber: number; character: number } {
   try {
-    const line = readFileSync(filePath, 'utf8').split(/\r?\n/)[Math.max(0, lineNumber - 1)] ?? '';
-    if (!line) return 1;
+    const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+    const idx = Math.max(0, lineNumber - 1);
+    const line = lines[idx] ?? '';
+    if (!line) return { lineNumber, character: 1 };
 
     const exact = line.indexOf(label);
-    if (exact >= 0) return exact + 1;
+    if (exact >= 0) return { lineNumber, character: exact + 1 };
 
     // Fallback: match token-ish prefix of label (handles variants/suffixes).
     const token = label.match(/[A-Za-z_][A-Za-z0-9_]*/)?.[0];
     if (token) {
       const partial = line.indexOf(token);
-      if (partial >= 0) return partial + 1;
+      if (partial >= 0) return { lineNumber, character: partial + 1 };
+
+      // If label token is not present on the current line, walk upward to find
+      // the nearest enclosing function signature that contains the label.
+      // This avoids resolving the currently called callee token on callsite lines.
+      for (let i = idx - 1; i >= Math.max(0, idx - 240); i -= 1) {
+        const prev = lines[i] ?? '';
+        if (!prev.includes(token)) continue;
+        if (!prev.includes('(')) continue;
+        const at = prev.indexOf(token);
+        if (at >= 0) {
+          return { lineNumber: i + 1, character: at + 1 };
+        }
+      }
     }
 
     // Fallback to first identifier-like token on line.
     const firstWord = line.match(/[A-Za-z_][A-Za-z0-9_]*/);
-    if (firstWord?.index != null) return firstWord.index + 1;
+    if (firstWord?.index != null) return { lineNumber, character: firstWord.index + 1 };
   } catch {
     // Ignore inference errors and fall back.
   }
 
-  return 1;
+  return { lineNumber, character: 1 };
 }
 
 export function App() {
@@ -79,6 +94,10 @@ export function App() {
   const activeRootKeyRef = useRef<string>(GLOBAL_CUSTOM_KEY);
   const queryWaiters = useRef(new Map<string, {
     resolve: (items: FlatRelationItem[]) => void;
+    reject: (error: Error) => void;
+  }>());
+  const hoverWaiters = useRef(new Map<string, {
+    resolve: (text: string) => void;
     reject: (error: Error) => void;
   }>());
   const queryInFlightByNode = useRef(new Map<string, Promise<FlatRelationItem[]>>());
@@ -179,6 +198,22 @@ export function App() {
         return;
       }
 
+      if (message.type === 'hover_result') {
+        const waiter = hoverWaiters.current.get(message.payload.requestId);
+        if (!waiter) return;
+        hoverWaiters.current.delete(message.payload.requestId);
+        waiter.resolve(message.payload.hoverText || '');
+        return;
+      }
+
+      if (message.type === 'hover_error') {
+        const waiter = hoverWaiters.current.get(message.payload.requestId);
+        if (!waiter) return;
+        hoverWaiters.current.delete(message.payload.requestId);
+        waiter.reject(new Error(message.payload.error || 'hover failed'));
+        return;
+      }
+
       if (message.type === 'refresh') {
         logInfo('app', 'refresh requested by host');
         sendBridgeMessage({ type: 'request_refresh' });
@@ -238,7 +273,7 @@ export function App() {
 
       const promise = new Promise<FlatRelationItem[]>((resolve, reject) => {
         const requestId = crypto.randomUUID();
-        const inferredCharacter = inferCharacter(node.filePath, node.lineNumber, node.label);
+        const inferred = inferSourcePoint(node.filePath, node.lineNumber, node.label);
         const timer = setTimeout(() => {
           queryWaiters.current.delete(requestId);
           logError('app', 'query timeout', { requestId, parentId: node.id, timeoutMs: QUERY_TIMEOUT_MS });
@@ -250,7 +285,8 @@ export function App() {
           parentId: node.id,
           filePath: node.filePath,
           lineNumber: node.lineNumber,
-          inferredCharacter,
+          inferredLineNumber: inferred.lineNumber,
+          inferredCharacter: inferred.character,
           mode: node.mode,
         });
 
@@ -272,8 +308,8 @@ export function App() {
             requestId,
             parentId: node.id,
             filePath: node.filePath,
-            lineNumber: node.lineNumber,
-            character: inferredCharacter,
+            lineNumber: inferred.lineNumber,
+            character: inferred.character,
             mode: node.mode,
           },
         });
@@ -284,6 +320,39 @@ export function App() {
     },
     [],
   );
+
+  const requestHover = useCallback((node: { id: string; filePath: string; lineNumber: number; label: string }) => {
+    return new Promise<string>((resolve, reject) => {
+      const requestId = crypto.randomUUID();
+      const inferred = inferSourcePoint(node.filePath, node.lineNumber, node.label);
+      const timer = setTimeout(() => {
+        hoverWaiters.current.delete(requestId);
+        reject(new Error(`hover timed out after ${QUERY_TIMEOUT_MS}ms`));
+      }, QUERY_TIMEOUT_MS);
+
+      hoverWaiters.current.set(requestId, {
+        resolve: (text) => {
+          clearTimeout(timer);
+          resolve(text);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
+
+      sendBridgeMessage({
+        type: 'query_hover',
+        payload: {
+          requestId,
+          nodeId: node.id,
+          filePath: node.filePath,
+          lineNumber: inferred.lineNumber,
+          character: inferred.character,
+        },
+      });
+    });
+  }, []);
 
   return (
     <RelationWindow
@@ -296,6 +365,7 @@ export function App() {
       incomingItems={mergedIncomingItems}
       outgoingItems={mergedOutgoingItems}
       requestExpand={requestExpand}
+      requestHover={requestHover}
       onOpenLocation={(item) => {
         logInfo('app', 'open_location requested', {
           label: item.label,

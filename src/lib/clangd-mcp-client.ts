@@ -4,6 +4,17 @@ import net from 'node:net';
 import cp from 'node:child_process';
 import type { BackendQuery, BackendRelationPayload } from './backend-types';
 import { logInfo, logWarn } from './logger';
+import {
+  initCache,
+  getCacheKey,
+  lookupCache,
+  validateCacheFreshness,
+  storeCache,
+  updateLastAccessed,
+  deleteCache,
+  extractEvidenceFiles,
+  type CacheQuery,
+} from './relation-cache';
 
 /**
  * Normalise a workspace root path.
@@ -97,11 +108,91 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
     probed: resolved.probed,
   });
 
-  if (query.mode === 'incoming') {
-    const incomingText = await callTool(mcpUrl, sessionId, 'lsp_incoming_calls', resolved.point);
-    const calledBy = parseIncomingCalls(incomingText, workspaceRoot);
+  // ── CACHE LOOKUP ──
+  const db = initCache(workspaceRoot);
+  const cacheQuery: CacheQuery = {
+    workspaceRoot,
+    filePath: resolved.point.file,
+    line: resolved.point.line,
+    character: resolved.point.character,
+    mode: query.mode,
+    resolvedSymbol: root.name,
+  };
+  const cacheKey = getCacheKey(cacheQuery);
+  
+  const cached = lookupCache(db, cacheKey);
+  if (cached) {
+    const isFresh = validateCacheFreshness(db, cacheKey);
+    if (isFresh) {
+      logInfo('backend', 'cache hit (fresh)', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
+      updateLastAccessed(db, cacheKey);
+      db.close();
+      return cached.payload;
+    } else {
+      logInfo('backend', 'cache hit (stale)', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
+      deleteCache(db, cacheKey);
+    }
+  } else {
+    logInfo('backend', 'cache miss', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
+  }
 
-    return {
+  // ── CACHE MISS: existing tool escalation ──
+  if (query.mode === 'incoming') {
+    const indirectText = await callTool(mcpUrl, sessionId, 'lsp_indirect_callers', {
+      ...resolved.point,
+      maxNodes: 50,
+    });
+    const incomingText = await callTool(mcpUrl, sessionId, 'lsp_incoming_calls', resolved.point);
+    logInfo('backend', 'indirect-callers-raw-sample', {
+      rootName: root.name,
+      size: indirectText.length,
+      sample: indirectText.split('\n').slice(0, 8),
+    });
+    const parsed = parseIndirectCallers(
+      indirectText,
+      workspaceRoot,
+      root.name,
+      resolved.point.file,
+      resolved.point.line,
+    );
+    const incomingFallback = parseIncomingCalls(incomingText, workspaceRoot);
+    const mergedCalledBy = mergeIncomingSources(parsed.calledBy, incomingFallback);
+    logInfo('backend', 'incoming-calls-raw-sample', {
+      rootName: root.name,
+      size: incomingText.length,
+      sample: incomingText.split('\n').slice(0, 8),
+      parsedCount: incomingFallback.length,
+      mergedCount: mergedCalledBy.length,
+    });
+    let canonicalCalledBy = rankIncomingCallers(dedupeIncomingByCanonicalCaller(mergedCalledBy));
+    if (!hasNonTestCaller(canonicalCalledBy)) {
+      const referencesText = await callTool(mcpUrl, sessionId, 'lsp_references', resolved.point);
+      const refFallback = parseReferenceRegistrations(
+        referencesText,
+        workspaceRoot,
+        root.name,
+        resolved.point.file,
+        resolved.point.line,
+      );
+      logInfo('backend', 'references-raw-sample', {
+        rootName: root.name,
+        size: referencesText.length,
+        sample: referencesText.split('\n').slice(0, 12),
+      });
+      canonicalCalledBy = rankIncomingCallers(
+        dedupeIncomingByCanonicalCaller(mergeIncomingSources(canonicalCalledBy, refFallback)),
+      );
+      logInfo('backend', 'reference-fallback-sample', {
+        rootName: root.name,
+        size: referencesText.length,
+        sample: referencesText.split('\n').slice(0, 8),
+        parsedCount: refFallback.length,
+        finalCount: canonicalCalledBy.length,
+      });
+    }
+    logInfo('backend', 'indirect-callers-parsed', { rootName: root.name, count: canonicalCalledBy.length });
+
+    const payload: BackendRelationPayload = {
       mode: 'incoming',
       provider: 'clangd-mcp',
       result: {
@@ -110,23 +201,25 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
           filePath: resolved.point.file,
           lineNumber: resolved.point.line,
           character: resolved.point.character,
-          calledBy,
+          calledBy: canonicalCalledBy,
+          ...(parsed.systemNodes?.length ? { systemNodes: parsed.systemNodes } : {}),
+          ...(parsed.systemLinks?.length ? { systemLinks: parsed.systemLinks } : {}),
         },
       },
     };
+
+    // ── CACHE STORE ──
+    const evidenceFiles = extractEvidenceFiles(payload);
+    storeCache(db, cacheKey, cacheQuery, payload, evidenceFiles);
+    db.close();
+
+    return payload;
   }
 
   const outgoingText = await callTool(mcpUrl, sessionId, 'lsp_outgoing_calls', resolved.point);
-  const directCalls = parseOutgoingCalls(outgoingText, workspaceRoot);
-  const registrationCalls = inferRegisteredHandlerCalls(
-    resolved.point.file,
-    resolved.point.line,
-    workspaceRoot,
-    root.name,
-  );
-  const calls = mergeOutgoingCalls(directCalls, registrationCalls);
+  const calls = parseOutgoingCalls(outgoingText, workspaceRoot);
 
-  return {
+  const payload: BackendRelationPayload = {
     mode: 'outgoing',
     provider: 'clangd-mcp',
     result: {
@@ -139,6 +232,158 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
       },
     },
   };
+
+  // ── CACHE STORE ──
+  const evidenceFiles = extractEvidenceFiles(payload);
+  storeCache(db, cacheKey, cacheQuery, payload, evidenceFiles);
+  db.close();
+
+  return payload;
+}
+
+function parseIncomingCalls(
+  text: string,
+  workspaceRoot: string,
+): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
+  const cleaned = stripIndexSuffix(text);
+  if (
+    cleaned.includes('No callers found') ||
+    cleaned.includes('No call hierarchy item') ||
+    cleaned.includes('No symbol found') ||
+    cleaned.includes('(none found)')
+  ) {
+    return [];
+  }
+
+  const out: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> = [];
+  for (const raw of cleaned.split('\n')) {
+    const line = raw.trimEnd();
+    const m = line.match(/^\s*<-\s+\[(\w+)\](?:\s+\[([^\]]+)\])?\s+(\S+)\s+at\s+(.*):(\d+):\d+\s*$/);
+    if (!m) continue;
+    const [, kind, tags, caller, relPath, lineStr] = m;
+    const tagText = (tags || '').toLowerCase();
+    const connectionKind: 'api_call' | 'interface_registration' =
+      tagText.includes('reg-call') ? 'interface_registration' : 'api_call';
+    out.push({
+      caller: preferSymbolAlias(caller),
+      filePath: isAbsolute(relPath) ? relPath : join(workspaceRoot, relPath),
+      lineNumber: Number(lineStr),
+      symbolKind: SYMBOL_KIND_MAP[kind] ?? 12,
+      connectionKind,
+    });
+  }
+  return out;
+}
+
+function mergeIncomingSources(
+  primary: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]>,
+  secondary: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]>,
+): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
+  if (!primary.length) return secondary;
+  if (!secondary.length) return primary;
+  const out = [...primary];
+  const seen = new Set(out.map((x) => `${preferSymbolAlias(x.caller)}|${x.connectionKind}|${x.filePath}|${x.lineNumber}`));
+  for (const item of secondary) {
+    const key = `${preferSymbolAlias(item.caller)}|${item.connectionKind}|${item.filePath}|${item.lineNumber}`;
+    if (seen.has(key)) continue;
+    out.push(item);
+    seen.add(key);
+  }
+  return out;
+}
+
+function hasNonTestCaller(
+  items: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]>
+): boolean {
+  return items.some((x) => !isLikelyTestPath(x.filePath));
+}
+
+function parseReferenceRegistrations(
+  text: string,
+  workspaceRoot: string,
+  targetName: string,
+  targetFile: string,
+  targetLine: number,
+): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
+  const cleaned = stripIndexSuffix(text);
+  if (!cleaned || /No references|No symbol found|No call hierarchy item/i.test(cleaned)) return [];
+
+  const out: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> = [];
+  for (const raw of cleaned.split('\n')) {
+    const lineText = raw.trim();
+    const m = lineText.match(/^(?:-\s*)?(?<path>(?:file:\/\/)?[^:\s][^:]*?):(?<line>\d+):(?<col>\d+)\s*$/);
+    if (!m) continue;
+    const relPath = (m.groups?.path || '').replace(/^file:\/\//, '');
+    const lineStr = m.groups?.line || '0';
+    const filePath = isAbsolute(relPath) ? relPath : join(workspaceRoot, relPath);
+    const lineNumber = Number(lineStr);
+    if (resolve(filePath) === resolve(targetFile) && lineNumber === targetLine) continue;
+
+    const line = readLineSafe(filePath, lineNumber);
+    if (!line) continue;
+    if (!line.includes(targetName)) continue;
+    if (!/register|offldmgr_/i.test(line)) continue;
+
+    const owner = findEnclosingFunctionName(filePath, lineNumber) ?? basename(filePath);
+    const ownerLine = findEnclosingFunctionLine(filePath, lineNumber) ?? lineNumber;
+    out.push({
+      caller: preferSymbolAlias(owner),
+      filePath,
+      lineNumber: ownerLine,
+      symbolKind: 12,
+      connectionKind: 'interface_registration',
+    });
+  }
+  return out;
+}
+
+function readLineSafe(filePath: string, lineNumber: number): string {
+  try {
+    const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+    return lines[Math.max(0, lineNumber - 1)] ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function findEnclosingFunctionLine(filePath: string, fromLine: number): number | null {
+  try {
+    const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+    for (let i = Math.max(0, fromLine - 1); i >= Math.max(0, fromLine - 260); i -= 1) {
+      const line = lines[i] ?? '';
+      if (looksLikeFunctionDef(line)) return i + 1;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function findEnclosingFunctionName(filePath: string, fromLine: number): string | null {
+  try {
+    const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+    for (let i = Math.max(0, fromLine - 1); i >= Math.max(0, fromLine - 260); i -= 1) {
+      const line = lines[i] ?? '';
+      if (!looksLikeFunctionDef(line)) continue;
+      const mm = line.match(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*\{?\s*$/);
+      if (!mm) continue;
+      const name = mm[1];
+      if (/^(if|for|while|switch)$/.test(name)) continue;
+      return name;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function looksLikeFunctionDef(line: string): boolean {
+  const s = line.trim();
+  if (!s || s.startsWith('#')) return false;
+  if (!s.includes('(') || !s.includes(')')) return false;
+  if (s.endsWith(';')) return false;
+  if (/^(if|for|while|switch)\s*\(/.test(s)) return false;
+  return /\b[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*\)\s*\{?\s*$/.test(s);
 }
 
 export async function doctorClangdMcp(query: BackendQuery): Promise<{
@@ -530,9 +775,24 @@ function parseHoverForRoot(hoverText: string): { name: string; symbolKind: numbe
   // e.g. "function wlan_check_if_arp_or_ns_pkt" → "wlan_check_if_arp_or_ns_pkt"
   //      "method Foo::bar(int x)" → "Foo::bar"
   const withoutKind = plain.replace(/^\w+\s+/, ''); // strip leading keyword
-  const name = withoutKind.split(/[\s(<]/)[0]?.replace(/[;,]$/, '') || 'unknown';
+  const rawName = withoutKind.split(/[\s(<]/)[0]?.replace(/[;,]$/, '') || 'unknown';
+  const name = preferSymbolAlias(rawName);
 
   return { name, symbolKind };
+}
+
+function preferSymbolAlias(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return trimmed;
+
+  // General canonicalization for alias-style C symbol variants:
+  //   _foo, __foo, foo___RAM, _foo___RAM  -> foo
+  // This is intentionally generic so it applies to all similar patterns.
+  let canonical = trimmed;
+  canonical = canonical.replace(/^_+/, '');
+  canonical = canonical.replace(/___[A-Za-z0-9_]+$/, '');
+
+  return canonical || trimmed;
 }
 
 function isHoverUsable(firstLine: string): boolean {
@@ -641,44 +901,506 @@ function identifierCandidateColumns(lineText: string, cursorCharacter: number): 
   return out.slice(0, 8).map((x) => x.character);
 }
 
-function parseIncomingCalls(text: string, workspaceRoot: string) {
+// ── Section → connectionKind mapping for lsp_indirect_callers output ──────────
+type DerivedConnectionKind =
+  | 'api_call'
+  | 'interface_registration'
+  | 'sw_thread_comm'
+  | 'hw_interrupt'
+  | 'hw_ring'
+  | 'ring_signal'
+  | 'event'
+  | 'timer_callback'
+  | 'deferred_work'
+  | 'debugfs_op'
+  | 'ioctl_dispatch'
+  | 'ring_completion'
+  | 'custom';
+
+// ── Structured MediatedPath types (mirrors clangd-mcp trace-engine/trace-types) ──
+// These are the types emitted in the ---mediated-paths-json--- block.
+// Frontend consumes them without local inference.
+
+type MediatedEndpoint = {
+  endpointKind: string;
+  endpointId: string;
+  endpointLabel?: string;
+  origin: string;
+  filePath?: string;
+  lineNumber?: number;
+};
+
+type MediationStage = {
+  stageKind: string;
+  ownerSymbol: string;
+  filePath: string;
+  lineNumber: number;
+  ids?: Record<string, string>;
+};
+
+type MediatedPathEntry = {
+  pathId: string;
+  endpoint: MediatedEndpoint;
+  stages: MediationStage[];
+  confidence: { score: number; reasons: string[] };
+  evidence: Array<{ role: string; filePath: string; lineNumber: number }>;
+};
+
+/**
+ * Map a MediatedPath endpoint kind to a DerivedConnectionKind for the UI.
+ * Backend owns the semantic classification; frontend only maps to visual kind.
+ */
+function endpointKindToConnectionKind(endpointKind: string): DerivedConnectionKind {
+  switch (endpointKind) {
+    case 'host_interface':    return 'event';
+    case 'fw_signal_message': return 'ring_signal';
+    case 'hw_irq_or_ring':    return 'hw_interrupt';
+    case 'packet_rx':         return 'hw_ring';
+    case 'packet_tx':         return 'hw_ring';
+    case 'api_direct':        return 'api_call';
+    case 'os_timer':          return 'timer_callback';
+    case 'deferred_work':     return 'deferred_work';
+    case 'debugfs_op':        return 'debugfs_op';
+    case 'ioctl_dispatch':    return 'ioctl_dispatch';
+    case 'ring_completion':   return 'ring_completion';
+    default:                  return 'custom';
+  }
+}
+
+/**
+ * Map a mediation stage kind to a DerivedConnectionKind for the UI.
+ */
+function stageKindToConnectionKind(stageKind: string): DerivedConnectionKind {
+  switch (stageKind) {
+    case 'dispatch_table':
+    case 'registration_call':
+    case 'struct_store':
+    case 'ops_vtable':        return 'interface_registration';
+    case 'irq_registration':  return 'hw_interrupt';
+    case 'signal_wait':
+    case 'signal_raise':      return 'ring_signal';
+    case 'ring_dispatch':     return 'hw_ring';
+    case 'completion_store':
+    case 'completion_dispatch': return 'sw_thread_comm';
+    case 'timer_arm':         return 'timer_callback';
+    case 'work_schedule':     return 'deferred_work';
+    case 'debugfs_register':  return 'debugfs_op';
+    case 'ioctl_register':    return 'ioctl_dispatch';
+    case 'ring_post':         return 'ring_completion';
+    default:                  return 'api_call';
+  }
+}
+
+/**
+ * Extract the ---mediated-paths-json--- block from lsp_indirect_callers text.
+ * Returns parsed MediatedPathEntry[] or null if no block is present.
+ */
+function extractMediatedPathsJson(text: string): MediatedPathEntry[] | null {
+  const start = text.indexOf('---mediated-paths-json---');
+  const end   = text.indexOf('---end-mediated-paths-json---');
+  if (start === -1 || end === -1) return null;
+  const json = text.slice(start + '---mediated-paths-json---'.length, end).trim();
+  try {
+    const parsed = JSON.parse(json);
+    if (Array.isArray(parsed)) return parsed as MediatedPathEntry[];
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Convert MediatedPathEntry[] into CallerNode[] + systemNodes[] + systemLinks[].
+ *
+ * For each path:
+ *   - Endpoint → CallerNode with connectionKind from endpointKind
+ *   - Endpoint → systemNode (kind: endpoint)
+ *   - Each stage → systemNode (kind: mechanism)
+ *   - API callback → systemNode (kind: api)
+ *   - Links: endpoint -> stage(s) -> api
+ *
+ * This is the structured-path consumption path (Gate G8).
+ * Backend semantics are preserved; no local inference.
+ */
+function mediatedPathsToCallerNodes(
+  paths: MediatedPathEntry[],
+  callbackSymbol: string,
+  callbackFilePath: string,
+  callbackLineNumber: number,
+): {
+  calledBy: Array<{
+    caller: string;
+    filePath: string;
+    lineNumber: number;
+    symbolKind: number;
+    connectionKind: DerivedConnectionKind;
+    viaRegistrationApi?: string;
+  }>;
+  systemNodes: NonNullable<import('./types').RelationRootNode['systemNodes']>;
+  systemLinks: NonNullable<import('./types').RelationRootNode['systemLinks']>;
+} {
+  const canonicalCallback = preferSymbolAlias(callbackSymbol);
+  const calledBy: ReturnType<typeof mediatedPathsToCallerNodes>['calledBy'] = [];
+  const systemNodes: ReturnType<typeof mediatedPathsToCallerNodes>['systemNodes'] = [];
+  const systemLinks: ReturnType<typeof mediatedPathsToCallerNodes>['systemLinks'] = [];
+  const seenNodes = new Set<string>();
+  const seenCallers = new Set<string>();
+
+  const addNode = (id: string, name: string, kind: import('./types').SystemNodeKind, filePath?: string, lineNumber?: number) => {
+    if (seenNodes.has(id)) return;
+    seenNodes.add(id);
+    systemNodes.push({ id, name, kind, filePath, lineNumber });
+  };
+
+  // API callback node (always present)
+  const apiNodeId = `api-${canonicalCallback}`;
+  addNode(apiNodeId, canonicalCallback, 'api', callbackFilePath, callbackLineNumber);
+
+  for (const path of paths) {
+    const ep = path.endpoint;
+    const connKind = endpointKindToConnectionKind(ep.endpointKind);
+    const canonicalEndpointId = preferSymbolAlias(ep.endpointId);
+    const epLabel = preferSymbolAlias(ep.endpointLabel ?? ep.endpointId);
+
+    // Emit endpoint as a CallerNode (the "who invokes this API" answer)
+    const callerKey = `${canonicalEndpointId}|${connKind}`;
+    if (!seenCallers.has(callerKey)) {
+      seenCallers.add(callerKey);
+      calledBy.push({
+        caller: canonicalEndpointId,
+        filePath: ep.filePath ?? callbackFilePath,
+        lineNumber: ep.lineNumber ?? callbackLineNumber,
+        symbolKind: 12,
+        connectionKind: connKind,
+        viaRegistrationApi: path.stages[0]?.ownerSymbol,
+      });
+    }
+
+    // Endpoint system node
+    const epNodeId = `ep-${canonicalEndpointId}`;
+    addNode(epNodeId, epLabel, endpointKindToSystemNodeKind(ep.endpointKind), ep.filePath, ep.lineNumber);
+
+    // Mechanism stage nodes + links
+    let prevId = epNodeId;
+    for (const stage of path.stages) {
+      const canonicalOwner = preferSymbolAlias(stage.ownerSymbol);
+      const stageId = `stage-${stage.stageKind}-${canonicalOwner}`;
+      addNode(stageId, canonicalOwner, 'interface', stage.filePath, stage.lineNumber);
+      systemLinks.push({
+        fromId: prevId,
+        toId: stageId,
+        kind: stageKindToConnectionKind(stage.stageKind),
+      });
+      prevId = stageId;
+    }
+
+    // Link last stage (or endpoint) to API
+    systemLinks.push({
+      fromId: prevId,
+      toId: apiNodeId,
+      kind: connKind,
+    });
+  }
+
+  return { calledBy, systemNodes, systemLinks };
+}
+
+function endpointKindToSystemNodeKind(endpointKind: string): import('./types').SystemNodeKind {
+  switch (endpointKind) {
+    case 'host_interface':    return 'interface';
+    case 'fw_signal_message': return 'signal';
+    case 'hw_irq_or_ring':    return 'hw_interrupt';
+    case 'packet_rx':
+    case 'packet_tx':         return 'hw_ring';
+    case 'api_direct':        return 'api';
+    case 'os_timer':          return 'timer';
+    case 'deferred_work':     return 'work_queue';
+    default:                  return 'unknown';
+  }
+}
+
+/**
+ * Parse the plain-text output of the `lsp_indirect_callers` clangd-mcp tool
+ * into a CallerNode array.
+ *
+ * Strategy (Gate G8):
+ *   1. Try to extract and parse the structured `---mediated-paths-json---` block.
+ *      If present, convert MediatedPath[] → CallerNode[] + systemNodes[] + systemLinks[].
+ *      This is the primary path — backend semantics are preserved, no local inference.
+ *   2. Fall back to text-annotation parsing when no JSON block is present.
+ *      This preserves backward compatibility with older clangd-mcp versions.
+ *
+ * Contract ownership:
+ * - Backend (clangd-mcp) owns semantic classification.
+ * - Frontend parser only maps explicit backend labels to `connectionKind`.
+ */
+function parseIndirectCallers(
+  text: string,
+  workspaceRoot: string,
+  callbackSymbol?: string,
+  callbackFilePath?: string,
+  callbackLineNumber?: number,
+): {
+  calledBy: Array<{
+    caller: string;
+    filePath: string;
+    lineNumber: number;
+    symbolKind: number;
+    connectionKind: DerivedConnectionKind;
+    viaRegistrationApi?: string;
+  }>;
+  systemNodes?: NonNullable<import('./types').RelationRootNode['systemNodes']>;
+  systemLinks?: NonNullable<import('./types').RelationRootNode['systemLinks']>;
+} {
+  // ── Path 1: Structured JSON block (Gate G8) ──────────────────────────────
+  const mediatedPaths = extractMediatedPathsJson(text);
+  if (mediatedPaths && mediatedPaths.length > 0) {
+    const result = mediatedPathsToCallerNodes(
+      mediatedPaths,
+      callbackSymbol ?? '(unknown)',
+      callbackFilePath ?? '',
+      callbackLineNumber ?? 0,
+    );
+    return result;
+  }
+
+  // ── Path 2: Text-annotation fallback ─────────────────────────────────────
+  return { calledBy: parseIndirectCallersFromText(text, workspaceRoot) };
+}
+
+/**
+ * Text-annotation fallback parser for lsp_indirect_callers output.
+ * Used when no structured ---mediated-paths-json--- block is present.
+ */
+function parseIndirectCallersFromText(
+  text: string,
+  workspaceRoot: string,
+): Array<{
+  caller: string;
+  filePath: string;
+  lineNumber: number;
+  symbolKind: number;
+  connectionKind: DerivedConnectionKind;
+  viaRegistrationApi?: string;
+}> {
   const cleaned = stripIndexSuffix(text);
   if (
-    cleaned.includes('No incoming calls') ||
+    cleaned.includes('No callers found') ||
     cleaned.includes('No call hierarchy item') ||
-    cleaned.includes('No symbol found')
+    cleaned.includes('No symbol found') ||
+    cleaned.includes('(none found)')
   ) {
     return [];
   }
 
-  const lines = cleaned.split('\n').filter((line) => line.includes('<-'));
-  return lines
-    .map((line) => {
-      // Use a non-greedy path match anchored to the last :line:col at end of line.
-      // Pattern: <- [Kind] symbolName  at /path/to/file.cpp:42:7
-      // The path may contain spaces or " at " substrings, so we match everything
-      // up to the LAST occurrence of ":digits:digits" at end of line.
-      const match = line.match(/<-\s+\[(\w+)\]\s+(\S+)\s+at\s+(.*):(\d+):\d+\s*$/);
-      if (!match) {
-        return null;
-      }
+  type PendingNode = {
+    caller: string;
+    filePath: string;
+    lineNumber: number;
+    symbolKind: number;
+    connectionKind: DerivedConnectionKind;
+    viaRegistrationApi?: string;
+    // Real event source metadata (owned by backend; parser does no inference).
+    triggerType?: DerivedConnectionKind; // trigger-type: hw_interrupt | ring_signal | ...
+    triggerId?: string;                  // trigger-id: A_INUM_* | WLAN_THREAD_SIG_* | ...
+    triggerContext?: string;             // trigger-context: <source context>
+    dispatchEventId?: string;            // event: WMI_CMD_* (dispatch-table endpoint)
+    triggerOrigin?: string;              // trigger-origin: internal | external | host | firmware
+  };
 
-      const [, kind, caller, relPath, lineStr] = match;
-      return {
-        caller,
-        filePath: isAbsolute(relPath) ? relPath : join(workspaceRoot, relPath),
+  type CallerNode = {
+    caller: string;
+    filePath: string;
+    lineNumber: number;
+    symbolKind: number;
+    connectionKind: DerivedConnectionKind;
+    viaRegistrationApi?: string;
+  };
+
+  const out: CallerNode[] = [];
+  const seenEventSources = new Set<string>();
+  let currentKind: DerivedConnectionKind = 'api_call';
+  let pending: PendingNode | null = null;
+
+  const emitEventSource = (
+    caller: string,
+    connectionKind: DerivedConnectionKind,
+    filePath: string,
+    lineNumber: number,
+    viaRegistrationApi?: string,
+  ) => {
+    const key = `${caller}|${connectionKind}`;
+    if (seenEventSources.has(key)) return;
+    seenEventSources.add(key);
+    out.push({ caller, filePath, lineNumber, symbolKind: 12, connectionKind, viaRegistrationApi });
+  };
+
+  const flush = () => {
+    if (!pending) return;
+
+    // Always emit the registrar node
+    out.push({
+      caller: pending.caller,
+      filePath: pending.filePath,
+      lineNumber: pending.lineNumber,
+      symbolKind: pending.symbolKind,
+      connectionKind: pending.connectionKind,
+      viaRegistrationApi: pending.viaRegistrationApi,
+    });
+
+    // Explicit trigger node emitted only when backend supplies full trigger contract.
+    if (pending.triggerType && pending.triggerId) {
+      emitEventSource(
+        pending.triggerId,
+        pending.triggerType,
+        pending.filePath,
+        pending.lineNumber,
+        pending.triggerContext ?? pending.triggerOrigin ?? pending.viaRegistrationApi,
+      );
+    }
+
+    // Dispatch-table endpoints (e.g., WMI command IDs) are explicit event sources
+    // when backend provides `event:` metadata.
+    if (pending.dispatchEventId) {
+      emitEventSource(
+        pending.dispatchEventId,
+        'event',
+        pending.filePath,
+        pending.lineNumber,
+        pending.triggerOrigin ?? pending.triggerContext,
+      );
+    }
+
+    pending = null;
+  };
+
+  for (const rawLine of cleaned.split('\n')) {
+    const line = rawLine.trimEnd();
+
+    // ── Section header detection ──────────────────────────────────────────────
+    if (/^Direct callers\s*\(/i.test(line)) {
+      flush(); currentKind = 'api_call'; continue;
+    }
+    if (/^Dispatch-table registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'interface_registration'; continue;
+    }
+    if (/^Registration-call registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'interface_registration'; continue;
+    }
+    if (/^Struct registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'interface_registration'; continue;
+    }
+    if (/^Signal-based registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'ring_signal'; continue;
+    }
+    if (/^WMI Dispatch registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'interface_registration'; continue;
+    }
+    if (/^Hardware interrupt registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'hw_interrupt'; continue;
+    }
+    if (/^Ring signal registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'ring_signal'; continue;
+    }
+    if (/^Event registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'event'; continue;
+    }
+    if (/^Thread signal registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'ring_signal'; continue;
+    }
+    if (/^Timer callback registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'timer_callback'; continue;
+    }
+    if (/^Deferred work registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'deferred_work'; continue;
+    }
+    if (/^DebugFS registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'debugfs_op'; continue;
+    }
+    if (/^IOCTL dispatch registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'ioctl_dispatch'; continue;
+    }
+    if (/^Ring completion registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'ring_completion'; continue;
+    }
+    if (/^Work queue registrations\s*\(/i.test(line)) {
+      flush(); currentKind = 'deferred_work'; continue;
+    }
+
+    // ── Entry line: "  <- [Kind] name  at path:line:col" ─────────────────────
+    const entryMatch = line.match(
+      /^\s*<-\s+\[(\w+)\](?:\s+\[[^\]]+\])*\s+(\S+)\s+at\s+(.*):(\d+):\d+\s*$/,
+    );
+    if (entryMatch) {
+      flush();
+      const [, kind, caller, relPath, lineStr] = entryMatch;
+      const filePath = isAbsolute(relPath) ? relPath : join(workspaceRoot, relPath);
+      pending = {
+        caller: preferSymbolAlias(caller),
+        filePath,
         lineNumber: Number(lineStr),
         symbolKind: SYMBOL_KIND_MAP[kind] ?? 12,
-        connectionKind: 'api_call' as const,
+        connectionKind: currentKind,
       };
-    })
-    .filter((item): item is {
-      caller: string;
-      filePath: string;
-      lineNumber: number;
-      symbolKind: number;
-      connectionKind: 'api_call';
-    } => item !== null);
+      continue;
+    }
+
+    if (!pending) continue;
+
+    // ── Annotation lines ──────────────────────────────────────────────────────
+
+    // "     via: offldmgr_register_nondata_offload"
+    const viaMatch = line.match(/^\s+via:\s+(\S+)/);
+    if (viaMatch) { pending.viaRegistrationApi = viaMatch[1]; continue; }
+
+    // "     trigger-type: hw_interrupt"
+    const triggerTypeMatch = line.match(/^\s+trigger-type:\s+([a-z_]+)/i);
+    if (triggerTypeMatch) {
+      const triggerType = triggerTypeMatch[1].toLowerCase() as DerivedConnectionKind;
+      if (
+        triggerType === 'api_call' ||
+        triggerType === 'interface_registration' ||
+        triggerType === 'sw_thread_comm' ||
+        triggerType === 'hw_interrupt' ||
+        triggerType === 'hw_ring' ||
+        triggerType === 'ring_signal' ||
+        triggerType === 'event' ||
+        triggerType === 'timer_callback' ||
+        triggerType === 'deferred_work' ||
+        triggerType === 'debugfs_op' ||
+        triggerType === 'ioctl_dispatch' ||
+        triggerType === 'ring_completion' ||
+        triggerType === 'custom'
+      ) {
+        pending.triggerType = triggerType;
+      }
+      continue;
+    }
+
+    // "     trigger-id: WLAN_THREAD_SIG_* or A_INUM_*"
+    const triggerIdMatch = line.match(/^\s+trigger-id:\s+(\S+)/);
+    if (triggerIdMatch) { pending.triggerId = triggerIdMatch[1]; continue; }
+
+    // "     event: WMI_*"
+    const eventMatch = line.match(/^\s+event:\s+(\S+)/);
+    if (eventMatch) { pending.dispatchEventId = eventMatch[1]; continue; }
+
+    // "     trigger-origin: external(host)" (optional trigger source owner)
+    const triggerOriginMatch = line.match(/^\s+trigger-origin:\s+(.+)/i);
+    if (triggerOriginMatch) { pending.triggerOrigin = triggerOriginMatch[1].trim(); continue; }
+
+    // "     trigger-context: cmnos_irq_register(A_INUM_TQM_STATUS_HI, me, WLAN_THREAD_SIG_*)"
+    // Full registration call line — attached to the hw_interrupt event source node
+    // so the user can see both the interrupt ID and the signal ID together and
+    // immediately find where in the code the signal is triggered.
+    const trigCtxMatch = line.match(/^\s+trigger-context:\s+(.+)/);
+    if (trigCtxMatch) { pending.triggerContext = trigCtxMatch[1].trim(); continue; }
+
+    // Legacy clangd-mcp annotations are ignored; canonical contract is trigger-*.
+  }
+
+  flush();
+  return out;
 }
 
 function parseOutgoingCalls(text: string, workspaceRoot: string) {
@@ -694,7 +1416,7 @@ function parseOutgoingCalls(text: string, workspaceRoot: string) {
   const lines = cleaned.split('\n').filter((line) => line.includes('->'));
   return lines
     .map((line) => {
-      // Same non-greedy fix as parseIncomingCalls — anchor to last :line:col.
+      // Anchor to last :line:col at end of line.
       const match = line.match(/->\s+\[(\w+)\]\s+(\S+)\s+at\s+(.*):(\d+):\d+\s*$/);
       if (!match) {
         return null;
@@ -702,7 +1424,7 @@ function parseOutgoingCalls(text: string, workspaceRoot: string) {
 
       const [, kind, callee, relPath, lineStr] = match;
       return {
-        callee,
+        callee: preferSymbolAlias(callee),
         filePath: isAbsolute(relPath) ? relPath : join(workspaceRoot, relPath),
         lineNumber: Number(lineStr),
         symbolKind: SYMBOL_KIND_MAP[kind] ?? 12,
@@ -718,171 +1440,64 @@ function parseOutgoingCalls(text: string, workspaceRoot: string) {
     } => item !== null);
 }
 
+function dedupeIncomingByCanonicalCaller(
+  items: NonNullable<BackendRelationPayload['result']>[string]['calledBy']
+): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
+  if (!items || items.length === 0) return [];
+  if (items.length === 1) return [{ ...items[0], caller: preferSymbolAlias(items[0].caller) }];
+
+  const byCaller = new Map<string, (typeof items)[number]>();
+  for (const item of items) {
+    if (!item) continue;
+    const key = preferSymbolAlias(item.caller);
+    const existing = byCaller.get(key);
+    if (!existing) {
+      byCaller.set(key, { ...item, caller: key });
+      continue;
+    }
+
+    const existingIsRom = /\/rom\//.test(existing.filePath);
+    const currentIsRom = /\/rom\//.test(item.filePath);
+    if (existingIsRom && !currentIsRom) {
+      byCaller.set(key, { ...item, caller: key });
+    }
+  }
+
+  return Array.from(byCaller.values());
+}
+
+function isLikelyTestPath(filePath: string): boolean {
+  return /(?:^|\/)wlan_test(?:\/|$)|(?:^|\/)qtf_simxpert(?:\/|$)|(?:^|\/)unit_test(?:\/|$)|_unit_test\./i.test(filePath);
+}
+
+function rankIncomingCallers(
+  items: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]>
+): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
+  if (items.length <= 1) return items;
+  return [...items].sort((a, b) => {
+    const aTest = isLikelyTestPath(a.filePath) ? 1 : 0;
+    const bTest = isLikelyTestPath(b.filePath) ? 1 : 0;
+    if (aTest !== bTest) return aTest - bTest;
+
+    const aReg = a.connectionKind === 'interface_registration' ? 0 : 1;
+    const bReg = b.connectionKind === 'interface_registration' ? 0 : 1;
+    if (aReg !== bReg) return aReg - bReg;
+
+    if (a.caller !== b.caller) return a.caller.localeCompare(b.caller);
+    if (a.filePath !== b.filePath) return a.filePath.localeCompare(b.filePath);
+    return a.lineNumber - b.lineNumber;
+  });
+}
+
 function isRegistrationApiName(name: string): boolean {
   const n = name.toLowerCase();
-  if (n.includes('register') || n.includes('unregister')) return true;
-  if (n.includes('subscribe') || n.includes('attach') || n.includes('hook')) return true;
-  if (n.includes('notif') && (n.includes('handler') || n.includes('cb') || n.includes('callback'))) return true;
   if (n.includes('offldmgr_register_nondata_offload')) return true;
-  return false;
-}
-
-function mergeOutgoingCalls(
-  base: Array<{
-    callee: string;
-    filePath: string;
-    lineNumber: number;
-    symbolKind: number;
-    connectionKind?: 'api_call' | 'interface_registration';
-    viaRegistrationApi?: string;
-  }>,
-  extra: Array<{
-    callee: string;
-    filePath: string;
-    lineNumber: number;
-    symbolKind: number;
-    connectionKind?: 'api_call' | 'interface_registration';
-    viaRegistrationApi?: string;
-  }>,
-) {
-  const out = [...base];
-  const seen = new Set(base.map((x) => `${x.callee}|${x.filePath}|${x.lineNumber}|${x.connectionKind || 'api_call'}`));
-  for (const item of extra) {
-    const key = `${item.callee}|${item.filePath}|${item.lineNumber}|${item.connectionKind || 'api_call'}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out;
-}
-
-function inferRegisteredHandlerCalls(
-  filePath: string,
-  rootLine: number,
-  workspaceRoot: string,
-  rootName: string,
-) {
-  const source = safeReadFile(filePath);
-  if (!source) return [];
-
-  const fnBody = extractFunctionBodyAtLine(source, rootLine);
-  if (!fnBody) return [];
-
-  const statements = fnBody.split(';');
-  const out: Array<{
-    callee: string;
-    filePath: string;
-    lineNumber: number;
-    symbolKind: number;
-    connectionKind: 'interface_registration';
-    viaRegistrationApi: string;
-  }> = [];
-  const seen = new Set<string>();
-
-  for (const stmtRaw of statements) {
-    const stmt = stmtRaw.replace(/\s+/g, ' ').trim();
-    if (!stmt) continue;
-    const callMatch = stmt.match(/([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$/);
-    if (!callMatch) continue;
-    const regApi = callMatch[1];
-    if (!isRegistrationApiName(regApi)) continue;
-
-    const argsText = callMatch[2] || '';
-    const callbacks = extractCallbackIdentifiers(argsText, regApi, rootName);
-    for (const cb of callbacks) {
-      const cbLoc = findFunctionDefinitionInWorkspace(workspaceRoot, filePath, cb);
-      const key = `${cb}|${cbLoc.filePath}|${cbLoc.lineNumber}|${regApi}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push({
-        callee: cb,
-        filePath: cbLoc.filePath,
-        lineNumber: cbLoc.lineNumber,
-        symbolKind: 12,
-        connectionKind: 'interface_registration',
-        viaRegistrationApi: regApi,
-      });
-    }
-  }
-
-  return out;
-}
-
-function safeReadFile(filePath: string): string {
-  try {
-    return readFileSync(filePath, 'utf8');
-  } catch {
-    return '';
-  }
-}
-
-function extractFunctionBodyAtLine(source: string, lineNumber: number): string {
-  const lines = source.split(/\r?\n/);
-  const startIdx = Math.max(0, lineNumber - 1);
-  const textFromLine = lines.slice(startIdx, Math.min(lines.length, startIdx + 260)).join('\n');
-  const openIdx = textFromLine.indexOf('{');
-  if (openIdx < 0) return '';
-
-  let depth = 0;
-  for (let i = openIdx; i < textFromLine.length; i += 1) {
-    const ch = textFromLine[i];
-    if (ch === '{') depth += 1;
-    else if (ch === '}') depth -= 1;
-    if (depth === 0) {
-      return textFromLine.slice(openIdx + 1, i);
-    }
-  }
-  return '';
-}
-
-function extractCallbackIdentifiers(argsText: string, regApi: string, rootName: string): string[] {
-  const tokens = argsText.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  for (const tok of tokens) {
-    if (tok === regApi || tok === rootName) continue;
-    if (/^[A-Z0-9_]+$/.test(tok)) continue;
-    if (/^(NULL|void|int|char|long|short|float|double|const|static|return)$/i.test(tok)) continue;
-    if (!/(handler|cb|callback|notif|event|dispatch|indication)/i.test(tok) && !tok.startsWith('_')) continue;
-    if (seen.has(tok)) continue;
-    seen.add(tok);
-    out.push(tok);
-  }
-  return out;
-}
-
-function findFunctionDefinitionInWorkspace(workspaceRoot: string, fallbackFile: string, symbol: string): { filePath: string; lineNumber: number } {
-  const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const defRe = new RegExp(`\\b${escaped}\\s*\\([^;]*\\)\\s*\\{`);
-
-  const fallbackSource = safeReadFile(fallbackFile);
-  if (fallbackSource) {
-    const lines = fallbackSource.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i += 1) {
-      if (defRe.test(lines[i] || '')) {
-        return { filePath: fallbackFile, lineNumber: i + 1 };
-      }
-    }
-  }
-
-  try {
-    const rgCmd = ['rg', '-n', '--no-heading', '--glob', '*.[ch]', `\\b${escaped}\\s*\\(`, workspaceRoot];
-    const res = cp.spawnSync(rgCmd[0], rgCmd.slice(1), { encoding: 'utf8' });
-    if (res.status === 0 && res.stdout) {
-      const line = res.stdout.split(/\r?\n/).find((x) => x.trim().length > 0);
-      if (line) {
-        const m = line.match(/^(.*?):(\d+):/);
-        if (m) {
-          return {
-            filePath: isAbsolute(m[1]) ? m[1] : join(workspaceRoot, m[1]),
-            lineNumber: Number(m[2]),
-          };
-        }
-      }
-    }
-  } catch {
-    // Best-effort fallback below.
-  }
-
-  return { filePath: fallbackFile, lineNumber: 1 };
+  return (
+    n.includes('register') ||
+    n.includes('unregister') ||
+    n.includes('subscribe') ||
+    n.includes('attach') ||
+    n.includes('hook') ||
+    (n.includes('notif') && (n.includes('handler') || n.includes('cb') || n.includes('callback')))
+  );
 }
