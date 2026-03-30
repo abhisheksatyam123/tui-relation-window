@@ -6,6 +6,9 @@ import { normalizeRelationPayload } from './lib/relation';
 import { logError, logInfo, logWarn } from './lib/logger';
 import type { FlatRelationItem, QueryMode, RelationMode, RelationPayload } from './lib/types';
 import type { SystemStructureGraph } from './lib/system-structure';
+import { queryApiLogs, queryApiStructWrites, ensureSnapshotInitialized } from './lib/clangd-mcp-client';
+import { queryResultToLogRows, queryResultToStructWriterRows } from './lib/intelligence-query-adapters';
+import type { LogRow, StructWriterRow } from './lib/intelligence-query-adapters';
 
 type RelationState = {
   mode: 'incoming' | 'outgoing' | 'both';
@@ -87,7 +90,7 @@ function inferSourcePoint(filePath: string, lineNumber: number, label: string): 
   return { lineNumber, character: 1 };
 }
 
-export function App() {
+export function App({ workspaceRoot, mcpUrl }: { workspaceRoot?: string; mcpUrl?: string } = {}) {
   const [payload, setPayload] = useState<RelationPayload>(DEFAULT_PAYLOAD);
   const [customByRoot, setCustomByRoot] = useState<CustomByRoot>({});
   const lastPayloadHash = useRef<string>('');
@@ -354,6 +357,39 @@ export function App() {
     });
   }, []);
 
+  const requestLogs = useCallback(async (apiName: string): Promise<LogRow[]> => {
+    if (!workspaceRoot) {
+      logWarn('app', 'requestLogs: no workspaceRoot configured — set WORKSPACE_ROOT env var');
+      return [];
+    }
+    logInfo('app', 'requestLogs', { apiName, workspaceRoot });
+    // Ensure snapshot is initialized so intelligence_query has a valid snapshotId
+    try {
+      await ensureSnapshotInitialized({ workspaceRoot, mcpUrl });
+    } catch {
+      // Snapshot init failure is non-fatal — query will return not_found gracefully
+    }
+    const result = await queryApiLogs({ workspaceRoot, apiName, mcpUrl });
+    return queryResultToLogRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestStructWrites = useCallback(async (apiName: string): Promise<StructWriterRow[]> => {
+    if (!workspaceRoot) {
+      logWarn('app', 'requestStructWrites: no workspaceRoot configured — set WORKSPACE_ROOT env var');
+      return [];
+    }
+    logInfo('app', 'requestStructWrites', { apiName, workspaceRoot });
+    // Ensure snapshot is initialized so intelligence_query has a valid snapshotId
+    try {
+      await ensureSnapshotInitialized({ workspaceRoot, mcpUrl });
+    } catch {
+      // Snapshot init failure is non-fatal — query will return not_found gracefully
+    }
+    // Use API-centric query: what structs does this API write?
+    const result = await queryApiStructWrites({ workspaceRoot, apiName, mcpUrl });
+    return queryResultToStructWriterRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
   return (
     <RelationWindow
       mode={state.mode}
@@ -366,6 +402,9 @@ export function App() {
       outgoingItems={mergedOutgoingItems}
       requestExpand={requestExpand}
       requestHover={requestHover}
+      requestLogs={requestLogs}
+      requestStructWrites={requestStructWrites}
+      workspaceRoot={workspaceRoot}
       onOpenLocation={(item) => {
         logInfo('app', 'open_location requested', {
           label: item.label,

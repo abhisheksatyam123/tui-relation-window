@@ -2,7 +2,8 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import net from 'node:net';
 import cp from 'node:child_process';
-import type { BackendQuery, BackendRelationPayload } from './backend-types';
+import type { BackendConnectionKind, BackendQuery, BackendRelationPayload } from './backend-types';
+import type { CallerNode, CalleeNode, SystemConnectionKind } from './types';
 import { logInfo, logWarn } from './logger';
 import {
   initCache,
@@ -77,6 +78,7 @@ const SYMBOL_KIND_MAP: Record<string, number> = {
 export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<BackendRelationPayload> {
   const workspaceRoot = query.workspaceRoot ? resolve(query.workspaceRoot) : findWorkspaceRoot(query.filePath);
   const mcpUrl = normalizeMcpUrl(query.mcpUrl || (await resolveMcpUrl(workspaceRoot)));
+  await ensureSnapshotInitialized(workspaceRoot, mcpUrl);
   logInfo('backend', 'resolved mcp endpoint', { workspaceRoot, mcpUrl, mode: query.mode });
 
   const init = await sendRpc(mcpUrl, null, 'initialize', {
@@ -92,6 +94,8 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
   if (!sessionId) {
     throw new Error('MCP initialize did not return session id');
   }
+
+  const cacheAllowed = await isIndexReadyForCache(mcpUrl, sessionId);
 
   const point = {
     file: resolve(query.filePath),
@@ -120,77 +124,246 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
   };
   const cacheKey = getCacheKey(cacheQuery);
   
-  const cached = lookupCache(db, cacheKey);
-  if (cached) {
-    const isFresh = validateCacheFreshness(db, cacheKey);
-    if (isFresh) {
-      logInfo('backend', 'cache hit (fresh)', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
-      updateLastAccessed(db, cacheKey);
-      db.close();
-      return cached.payload;
+  if (cacheAllowed) {
+    const cached = lookupCache(db, cacheKey);
+    if (cached) {
+      const isFresh = validateCacheFreshness(db, cacheKey);
+      if (isFresh) {
+        logInfo('backend', 'cache hit (fresh)', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
+        updateLastAccessed(db, cacheKey);
+        db.close();
+        return cached.payload;
+      } else {
+        logInfo('backend', 'cache hit (stale)', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
+        deleteCache(db, cacheKey);
+      }
     } else {
-      logInfo('backend', 'cache hit (stale)', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
-      deleteCache(db, cacheKey);
+      logInfo('backend', 'cache miss', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
     }
   } else {
-    logInfo('backend', 'cache miss', { cacheKey: cacheKey.slice(0, 8), symbol: root.name });
+    logWarn('backend', 'cache disabled while index not ready', { symbol: root.name });
   }
 
-  // ── CACHE MISS: existing tool escalation ──
+  // ── CACHE MISS: runtime-first incoming query path ──
   if (query.mode === 'incoming') {
-    const indirectText = await callTool(mcpUrl, sessionId, 'lsp_indirect_callers', {
-      ...resolved.point,
-      maxNodes: 50,
-    });
-    const incomingText = await callTool(mcpUrl, sessionId, 'lsp_incoming_calls', resolved.point);
-    logInfo('backend', 'indirect-callers-raw-sample', {
-      rootName: root.name,
-      size: indirectText.length,
-      sample: indirectText.split('\n').slice(0, 8),
-    });
-    const parsed = parseIndirectCallers(
-      indirectText,
-      workspaceRoot,
-      root.name,
-      resolved.point.file,
-      resolved.point.line,
-    );
-    const incomingFallback = parseIncomingCalls(incomingText, workspaceRoot);
-    const mergedCalledBy = mergeIncomingSources(parsed.calledBy, incomingFallback);
-    logInfo('backend', 'incoming-calls-raw-sample', {
-      rootName: root.name,
-      size: incomingText.length,
-      sample: incomingText.split('\n').slice(0, 8),
-      parsedCount: incomingFallback.length,
-      mergedCount: mergedCalledBy.length,
-    });
-    let canonicalCalledBy = rankIncomingCallers(dedupeIncomingByCanonicalCaller(mergedCalledBy));
-    if (!hasNonTestCaller(canonicalCalledBy)) {
-      const referencesText = await callTool(mcpUrl, sessionId, 'lsp_references', resolved.point);
-      const refFallback = parseReferenceRegistrations(
-        referencesText,
-        workspaceRoot,
-        root.name,
-        resolved.point.file,
-        resolved.point.line,
-      );
-      logInfo('backend', 'references-raw-sample', {
-        rootName: root.name,
-        size: referencesText.length,
-        sample: referencesText.split('\n').slice(0, 12),
+    let calledBy: CallerNode[] = [];
+    
+    // Step 0: Try get_callers — unified single-endpoint that runs the full waterfall internally.
+    // Returns structured JSON with callers[] (runtime) + registrars[] (registration points).
+    // Falls back to the manual waterfall if get_callers is unavailable or returns empty.
+    try {
+      const getCallersText = await callTool(mcpUrl, sessionId, 'get_callers', {
+        file: resolved.point.file,
+        line: resolved.point.line,
+        character: resolved.point.character,
+        snapshotId: getResolvedSnapshotId(workspaceRoot) > 0
+          ? getResolvedSnapshotId(workspaceRoot)
+          : undefined,
+        maxNodes: 50,
+        resolve: true,
       });
-      canonicalCalledBy = rankIncomingCallers(
-        dedupeIncomingByCanonicalCaller(mergeIncomingSources(canonicalCalledBy, refFallback)),
-      );
-      logInfo('backend', 'reference-fallback-sample', {
-        rootName: root.name,
-        size: referencesText.length,
-        sample: referencesText.split('\n').slice(0, 8),
-        parsedCount: refFallback.length,
-        finalCount: canonicalCalledBy.length,
-      });
+      const getCallersResult = parseGetCallersResponse(getCallersText, workspaceRoot);
+      if (getCallersResult.length > 0) {
+        calledBy = getCallersResult;
+        logInfo('backend', 'get-callers-success', {
+          rootName: root.name,
+          callerCount: calledBy.length,
+          source: 'get_callers',
+        });
+        // Skip the manual waterfall — get_callers already ran it internally
+        calledBy = rankIncomingCallers(dedupeIncomingByCanonicalCaller(calledBy));
+        const payload: BackendRelationPayload = {
+          mode: 'incoming',
+          provider: 'clangd-mcp',
+          result: {
+            [root.name]: {
+              symbolKind: root.symbolKind,
+              filePath: resolved.point.file,
+              lineNumber: resolved.point.line,
+              character: resolved.point.character,
+              calledBy,
+            },
+          },
+        };
+        const evidenceFiles = extractEvidenceFiles(payload);
+        if (cacheAllowed) {
+          storeCache(db, cacheKey, cacheQuery, payload, evidenceFiles);
+        }
+        db.close();
+        return payload;
+      }
+    } catch {
+      // get_callers not available or returned empty — fall through to manual waterfall
     }
-    logInfo('backend', 'indirect-callers-parsed', { rootName: root.name, count: canonicalCalledBy.length });
+
+    // Runtime-first strategy: try lsp_runtime_flow first for runtime observation
+    try {
+      const runtimeFlowText = await callTool(mcpUrl, sessionId, 'lsp_runtime_flow', {
+        file: resolved.point.file,
+        line: resolved.point.line,
+        character: resolved.point.character,
+        targetSymbol: root.name,
+        workspaceRoot,
+      });
+      const runtimeCallers = parseRuntimeFlowToCallers(runtimeFlowText, workspaceRoot);
+      if (runtimeCallers.length > 0) {
+        calledBy = runtimeCallers;
+        logInfo('backend', 'runtime-flow-query-success', {
+          rootName: root.name,
+          callerCount: calledBy.length,
+        });
+      } else {
+        throw new Error('lsp_runtime_flow returned no runtime callers');
+      }
+    } catch (runtimeError) {
+      // Fallback to intelligence_query: try runtime graph first, then static graph
+      // Only attempt intelligence_query if a snapshot is available (snapshotId > 0)
+      const availableSnapshotId = getResolvedSnapshotId(workspaceRoot);
+      try {
+        if (availableSnapshotId <= 0) {
+          throw new Error('no snapshot available — skipping intelligence_query');
+        }
+        // Try who_calls_api_at_runtime for richer invocation type data
+        // Use alias variants so ___RAM and leading-_ variants are also checked
+        let queryResult: IntelligenceQueryResult;
+        let usedRuntimeQuery = false;
+        try {
+          queryResult = await intelligenceQueryWithAliases({
+            workspaceRoot,
+            intent: 'who_calls_api_at_runtime',
+            params: {
+              symbol: root.name,
+              filePath: resolved.point.file,
+              lineNumber: resolved.point.line,
+              maxNodes: 50,
+            },
+            snapshotId: getResolvedSnapshotId(workspaceRoot),
+            mcpUrl,
+          }, workspaceRoot, mcpUrl);
+          if (
+            queryResult.status === 'not_found' ||
+            queryResult.status === 'error' ||
+            queryResult.data.nodes.length === 0
+          ) {
+            throw new Error('no runtime callers from who_calls_api_at_runtime');
+          }
+          calledBy = queryResultToRuntimeCallerNodes(queryResult);
+          if (calledBy.length === 0) {
+            throw new Error('who_calls_api_at_runtime returned no parseable runtime callers — falling back to static graph');
+          }
+          usedRuntimeQuery = true;
+        } catch {
+          // Fall back to static who_calls_api (also with alias variants)
+          queryResult = await intelligenceQueryWithAliases({
+            workspaceRoot,
+            intent: 'who_calls_api',
+            params: {
+              symbol: root.name,
+              filePath: resolved.point.file,
+              lineNumber: resolved.point.line,
+              maxNodes: 50,
+            },
+            snapshotId: getResolvedSnapshotId(workspaceRoot),
+            mcpUrl,
+          }, workspaceRoot, mcpUrl);
+          calledBy = queryResultToCallerNodes(queryResult);
+        }
+        if (!usedRuntimeQuery) {
+          // Static graph was used — augment with lsp_indirect_callers (resolve:true)
+          // to add the actual runtime dispatch function names alongside the registrars.
+          // This gives the user both: the registrar (who wired it) AND the dispatcher (who calls it).
+          try {
+            const indirectText = await callTool(mcpUrl, sessionId, 'lsp_indirect_callers', {
+              file: resolved.point.file,
+              line: resolved.point.line,
+              character: resolved.point.character,
+              maxNodes: 50,
+              resolve: true,  // resolve:true gets dispatch chain → actual runtime invoker name
+            });
+            const parsed = parseIndirectCallers(
+              indirectText,
+              workspaceRoot,
+              root.name,
+              resolved.point.file,
+              resolved.point.line,
+            );
+            if (parsed.calledBy.length > 0) {
+              calledBy = mergeIncomingSources(calledBy, parsed.calledBy);
+            } else if (calledBy.length === 0) {
+              // No callers at all — fall back to lsp_incoming_calls
+              throw new Error('lsp_indirect_callers returned no callers — falling back to lsp_incoming_calls');
+            }
+          } catch {
+            if (calledBy.length === 0) {
+              // Still nothing — try lsp_incoming_calls as last resort
+              const incomingText = await callTool(mcpUrl, sessionId, 'lsp_incoming_calls', {
+                file: resolved.point.file,
+                line: resolved.point.line,
+                character: resolved.point.character,
+              });
+              calledBy = mergeIncomingSources(calledBy, parseIncomingCalls(incomingText, workspaceRoot));
+            }
+          }
+        }
+        logInfo('backend', 'intelligence-query-who-calls-api-fallback', {
+          rootName: root.name,
+          status: queryResult.status,
+          callerCount: calledBy.length,
+          usedRuntimeQuery,
+          runtimeError: runtimeError instanceof Error ? runtimeError.message : String(runtimeError),
+        });
+      } catch (error) {
+        // Last resort: use lsp_indirect_callers which finds BOTH direct and indirect callers
+        // (fn-ptr callbacks, dispatch table entries, registration patterns).
+        // This is richer than lsp_incoming_calls which only finds direct callers.
+        try {
+          const indirectText = await callTool(mcpUrl, sessionId, 'lsp_indirect_callers', {
+            file: resolved.point.file,
+            line: resolved.point.line,
+            character: resolved.point.character,
+            maxNodes: 50,
+            resolve: true,  // resolve:true gets dispatch chain → actual runtime invoker name
+          });
+          const parsed = parseIndirectCallers(
+            indirectText,
+            workspaceRoot,
+            root.name,
+            resolved.point.file,
+            resolved.point.line,
+          );
+          calledBy = parsed.calledBy;
+          logWarn('backend', 'all-db-queries-failed-using-lsp-indirect-callers', {
+            rootName: root.name,
+            callerCount: calledBy.length,
+            runtimeError: runtimeError instanceof Error ? runtimeError.message : String(runtimeError),
+            intelligenceError: error instanceof Error ? error.message : String(error),
+          });
+        } catch (indirectError) {
+          // Final fallback: lsp_incoming_calls (direct callers only)
+          const text = await callTool(mcpUrl, sessionId, 'lsp_incoming_calls', {
+            file: resolved.point.file,
+            line: resolved.point.line,
+            character: resolved.point.character,
+          });
+          calledBy = parseIncomingCalls(text, workspaceRoot);
+          logWarn('backend', 'all-incoming-queries-failed-using-lsp-fallback', {
+            rootName: root.name,
+            callerCount: calledBy.length,
+            runtimeError: runtimeError instanceof Error ? runtimeError.message : String(runtimeError),
+            intelligenceError: error instanceof Error ? error.message : String(error),
+            indirectError: indirectError instanceof Error ? indirectError.message : String(indirectError),
+          });
+        }
+      }
+    }
+
+    calledBy = rankIncomingCallers(dedupeIncomingByCanonicalCaller(calledBy));
+
+    // Show BOTH runtime callers AND registrars in the tree.
+    // The TUI distinguishes them by connectionKind:
+    //   api_call / hw_interrupt / ring_signal / timer_callback → runtime caller (◀── caller)
+    //   interface_registration                                  → registrar    (◀── [REG] via X)
+    // No filtering here — the UI renders the distinction visually.
 
     const payload: BackendRelationPayload = {
       mode: 'incoming',
@@ -201,23 +374,58 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
           filePath: resolved.point.file,
           lineNumber: resolved.point.line,
           character: resolved.point.character,
-          calledBy: canonicalCalledBy,
-          ...(parsed.systemNodes?.length ? { systemNodes: parsed.systemNodes } : {}),
-          ...(parsed.systemLinks?.length ? { systemLinks: parsed.systemLinks } : {}),
+          calledBy,
         },
       },
     };
 
     // ── CACHE STORE ──
     const evidenceFiles = extractEvidenceFiles(payload);
-    storeCache(db, cacheKey, cacheQuery, payload, evidenceFiles);
+    if (cacheAllowed) {
+      storeCache(db, cacheKey, cacheQuery, payload, evidenceFiles);
+    }
     db.close();
 
     return payload;
   }
 
-  const outgoingText = await callTool(mcpUrl, sessionId, 'lsp_outgoing_calls', resolved.point);
-  const calls = parseOutgoingCalls(outgoingText, workspaceRoot);
+  let calls: CalleeNode[] = [];
+  try {
+    const outgoingSnapshotId = getResolvedSnapshotId(workspaceRoot);
+    if (outgoingSnapshotId <= 0) {
+      throw new Error('no snapshot available — skipping intelligence_query for outgoing');
+    }
+    const outgoingQueryResult = await intelligenceQuery({
+      workspaceRoot,
+      intent: 'what_api_calls',
+      params: {
+        symbol: root.name,
+        filePath: resolved.point.file,
+        lineNumber: resolved.point.line,
+        maxNodes: 50,
+      },
+      snapshotId: outgoingSnapshotId,
+      mcpUrl,
+    });
+    calls = queryResultToCalleeNodes(outgoingQueryResult);
+    logInfo('backend', 'intelligence-query-what-does-api-call', {
+      rootName: root.name,
+      status: outgoingQueryResult.status,
+      calleeCount: calls.length,
+    });
+  } catch (error) {
+    const text = await callTool(mcpUrl, sessionId, 'lsp_outgoing_calls', {
+      file: resolved.point.file,
+      line: resolved.point.line,
+      character: resolved.point.character,
+    });
+    calls = parseOutgoingCalls(text, workspaceRoot);
+    logWarn('backend', 'intelligence_query outgoing failed; used lsp_outgoing_calls fallback', {
+      rootName: root.name,
+      calleeCount: calls.length,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   const payload: BackendRelationPayload = {
     mode: 'outgoing',
@@ -235,10 +443,205 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
 
   // ── CACHE STORE ──
   const evidenceFiles = extractEvidenceFiles(payload);
-  storeCache(db, cacheKey, cacheQuery, payload, evidenceFiles);
+  if (cacheAllowed) {
+    storeCache(db, cacheKey, cacheQuery, payload, evidenceFiles);
+  }
   db.close();
 
   return payload;
+}
+
+async function isIndexReadyForCache(mcpUrl: string, sessionId: string): Promise<boolean> {
+  try {
+    const text = await callTool(mcpUrl, sessionId, 'lsp_index_status', {});
+    // Backward compatibility: older/mock MCP servers may not expose lsp_index_status.
+    // In that case, keep cache behavior enabled.
+    if (/Unknown tool|not found|unsupported/i.test(text)) return true;
+    return /Index ready:\s*true|Progress:\s*100%|Status:\s*Index ready/i.test(text);
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Parse lsp_runtime_flow JSON output into CallerNode[].
+ * Extracts immediateInvoker from each runtimeFlow as the runtime caller.
+ */
+function parseRuntimeFlowToCallers(
+  text: string,
+  workspaceRoot: string,
+): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
+  try {
+    const payload = JSON.parse(text) as {
+      targetApi: string;
+      runtimeFlows: Array<{
+        targetApi: string;
+        runtimeTrigger: string;
+        dispatchChain: string[];
+        dispatchSite?: { symbol: string; filePath: string; lineNumber: number };
+        immediateInvoker: string;
+      }>;
+    };
+
+    const out: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> = [];
+    const seen = new Set<string>();
+
+    for (const flow of payload.runtimeFlows) {
+      if (!flow.immediateInvoker) continue;
+
+      const caller = preferSymbolAlias(flow.immediateInvoker);
+      const filePath = flow.dispatchSite?.filePath ?? '';
+      const lineNumber = flow.dispatchSite?.lineNumber ?? 0;
+      const key = `${caller}|${filePath}|${lineNumber}`;
+
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      out.push({
+        caller,
+        filePath: isAbsolute(filePath) ? filePath : join(workspaceRoot, filePath),
+        lineNumber,
+        symbolKind: 12, // Function
+        connectionKind: 'api_call',
+      });
+    }
+
+    return out;
+  } catch (error) {
+    logWarn('backend', 'parseRuntimeFlowToCallers failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
+}
+
+/**
+ * Parse the unified get_callers response into CallerNode[].
+ * 
+ * The backend returns:
+ *   - callers: runtime_caller + direct_caller entries (show these in the tree)
+ *   - registrars: interface_registration entries (context only, show with [REG] badge)
+ * 
+ * We merge both arrays but map callerRole to connectionKind:
+ *   - runtime_caller with invocationType → appropriate connectionKind
+ *   - direct_caller → api_call
+ *   - registrar → interface_registration
+ */
+function parseGetCallersResponse(
+  text: string,
+  workspaceRoot: string,
+): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
+  try {
+    const response = JSON.parse(text) as {
+      targetApi: string;
+      targetFile: string;
+      targetLine: number;
+      callers: Array<{
+        name: string;
+        filePath: string;
+        lineNumber: number;
+        callerRole: 'runtime_caller' | 'registrar' | 'direct_caller';
+        invocationType: string;
+        confidence: number;
+        viaRegistrationApi?: string;
+        source: string;
+      }>;
+      registrars: Array<{
+        name: string;
+        filePath: string;
+        lineNumber: number;
+        callerRole: 'runtime_caller' | 'registrar' | 'direct_caller';
+        invocationType: string;
+        confidence: number;
+        viaRegistrationApi?: string;
+        source: string;
+      }>;
+      source: string;
+      provenance: Record<string, unknown>;
+    };
+
+    const out: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> = [];
+    const seen = new Set<string>();
+
+    // Helper to map backend invocationType to frontend connectionKind
+    const mapInvocationTypeToConnectionKind = (
+      invocationType: string,
+      callerRole: string,
+    ): SystemConnectionKind => {
+      // Registrars are always interface_registration
+      if (callerRole === 'registrar') {
+        return 'interface_registration';
+      }
+      
+      // Map runtime invocation types
+      switch (invocationType) {
+        case 'runtime_direct_call':
+        case 'direct_call':
+          return 'api_call';
+        case 'runtime_callback_registration_call':
+        case 'runtime_function_pointer_call':
+        case 'runtime_dispatch_table_call':
+          return 'interface_registration';
+        case 'interface_registration':
+          return 'interface_registration';
+        default:
+          return 'api_call';
+      }
+    };
+
+    // Process callers array (runtime_caller + direct_caller)
+    for (const entry of response.callers || []) {
+      const caller = preferSymbolAlias(entry.name);
+      const filePath = entry.filePath
+        ? (isAbsolute(entry.filePath) ? entry.filePath : join(workspaceRoot, entry.filePath))
+        : '';
+      const lineNumber = entry.lineNumber || 0;
+      const connectionKind = mapInvocationTypeToConnectionKind(entry.invocationType, entry.callerRole);
+      
+      const key = `${caller}|${filePath}|${lineNumber}|${connectionKind}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      out.push({
+        caller,
+        filePath,
+        lineNumber,
+        symbolKind: 12, // Function
+        connectionKind,
+        ...(entry.viaRegistrationApi ? { viaRegistrationApi: entry.viaRegistrationApi } : {}),
+      });
+    }
+
+    // Process registrars array (show as context with [REG] badge)
+    for (const entry of response.registrars || []) {
+      const caller = preferSymbolAlias(entry.name);
+      const filePath = entry.filePath
+        ? (isAbsolute(entry.filePath) ? entry.filePath : join(workspaceRoot, entry.filePath))
+        : '';
+      const lineNumber = entry.lineNumber || 0;
+      const connectionKind = 'interface_registration' as const;
+      
+      const key = `${caller}|${filePath}|${lineNumber}|${connectionKind}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      out.push({
+        caller,
+        filePath,
+        lineNumber,
+        symbolKind: 12, // Function
+        connectionKind,
+        viaRegistrationApi: entry.name, // The registrar itself is the registration API
+      });
+    }
+
+    return out;
+  } catch (error) {
+    logWarn('backend', 'parseGetCallersResponse failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return [];
+  }
 }
 
 function parseIncomingCalls(
@@ -429,6 +832,695 @@ export async function doctorClangdMcp(query: BackendQuery): Promise<{
   };
 }
 
+export type BeginSnapshotArgs = {
+  workspaceRoot: string;
+  compileDbHash: string;
+  parserVersion?: string;
+  mcpUrl?: string;
+};
+
+export type BeginSnapshotResult = {
+  snapshotId: number;
+  status?: string;
+  createdAt?: string;
+  raw: string;
+};
+
+export type CommitSnapshotArgs = {
+  workspaceRoot: string;
+  snapshotId: number;
+  mcpUrl?: string;
+};
+
+export type CheckSnapshotArgs = {
+  workspaceRoot: string;
+  mcpUrl?: string;
+};
+
+export type CheckSnapshotResult = {
+  snapshotId: number;
+  exists: boolean;
+  status?: string;
+  supported: boolean;
+  raw: string;
+};
+
+export type IngestWorkspaceArgs = {
+  workspaceRoot: string;
+  compileDbHash?: string;
+  parserVersion?: string;
+  fileLimit?: number;
+  syncProjection?: boolean;
+  mcpUrl?: string;
+};
+
+export type IngestWorkspaceResult = {
+  snapshotId?: number;
+  extracted?: { symbols: number; types: number; edges: number };
+  persisted?: { symbols: number; types: number; edges: number };
+  raw: string;
+};
+
+export type IntelligenceQueryIntent =
+  | 'who_calls_api'
+  | 'who_calls_api_at_runtime'
+  | 'what_api_calls'
+  | 'find_api_logs'
+  | 'find_api_logs_by_level'
+  | 'find_struct_writers'
+  | 'find_struct_readers'
+  | 'current_structure_runtime_writers_of_structure'
+  | 'current_structure_runtime_readers_of_structure';
+
+export type IntelligenceQueryArgs = {
+  workspaceRoot: string;
+  intent: IntelligenceQueryIntent;
+  params: {
+    symbol?: string;
+    structName?: string;
+    filePath?: string;
+    lineNumber?: number;
+    maxDepth?: number;
+    maxNodes?: number;
+    logLevel?: 'ERROR' | 'WARN' | 'INFO' | 'DEBUG' | 'VERBOSE' | 'TRACE';
+  };
+  snapshotId?: number;
+  mcpUrl?: string;
+};
+
+export type IntelligenceQueryResult = {
+  status: 'hit' | 'enriched' | 'llm_fallback' | 'not_found' | 'error';
+  data: {
+    nodes: Array<Record<string, unknown>>;
+    edges: Array<Record<string, unknown>>;
+  };
+  provenance?: Record<string, unknown>;
+  raw: string;
+};
+
+const snapshotIdByWorkspace = new Map<string, number>();
+const snapshotInitByWorkspace = new Map<string, Promise<number>>();
+
+function getResolvedSnapshotId(workspaceRoot: string): number {
+  return snapshotIdByWorkspace.get(normaliseWorkspaceRoot(workspaceRoot)) ?? 0;
+}
+
+/** Reset module-level snapshot state. Use in test beforeEach to prevent cross-test contamination. */
+export function resetSnapshotState(): void {
+  snapshotIdByWorkspace.clear();
+  snapshotInitByWorkspace.clear();
+}
+
+async function ensureSnapshotInitialized(workspaceRoot: string, mcpUrl?: string): Promise<number> {
+  const root = normaliseWorkspaceRoot(workspaceRoot);
+  const pending = snapshotInitByWorkspace.get(root);
+  if (pending) return pending;
+
+  const init = ensureSnapshotInitializedInner(root, mcpUrl)
+    .finally(() => snapshotInitByWorkspace.delete(root));
+  snapshotInitByWorkspace.set(root, init);
+  return init;
+}
+
+async function ensureSnapshotInitializedInner(workspaceRoot: string, mcpUrl?: string): Promise<number> {
+  try {
+    const cachedSnapshotId = snapshotIdByWorkspace.get(workspaceRoot);
+    if (cachedSnapshotId) {
+      return cachedSnapshotId;
+    }
+
+    const existing = await checkSnapshot({ workspaceRoot, mcpUrl });
+    if (existing.supported && existing.exists) {
+      snapshotIdByWorkspace.set(workspaceRoot, existing.snapshotId);
+      return existing.snapshotId;
+    }
+
+    const ingest = await ingestWorkspace({ workspaceRoot, mcpUrl });
+    const snapshotId = ingest.snapshotId;
+    if (!snapshotId || !Number.isFinite(snapshotId)) {
+      // Some clangd-mcp builds expose intelligence_query but do not emit a
+      // snapshot id in intelligence_ingest text output. Treat this as
+      // non-blocking and continue in snapshotless mode.
+      logWarn('backend', 'snapshot initialization continuing without snapshot id', {
+        workspaceRoot,
+        raw: ingest.raw.slice(0, 300),
+      });
+      return 0;
+    }
+
+    snapshotIdByWorkspace.set(workspaceRoot, snapshotId);
+    return snapshotId;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isSnapshotCapabilityGap(message)) {
+      return 0;
+    }
+    throw new Error(`snapshot initialization failed: ${message}`);
+  }
+}
+
+function isSnapshotCapabilityGap(message: string): boolean {
+  const lower = message.toLowerCase();
+  return (
+    lower.includes('unknown tool: intelligence_snapshot') ||
+    lower.includes('unknown tool: intelligence_ingest') ||
+    lower.includes('method not found')
+  );
+}
+
+export async function beginSnapshot(args: BeginSnapshotArgs): Promise<BeginSnapshotResult> {
+  try {
+    const { mcpUrl, sessionId } = await initMcpToolSession(args.workspaceRoot, args.mcpUrl, 'q-relation-tui-snapshot-begin');
+    const text = await callTool(mcpUrl, sessionId, 'intelligence_snapshot', {
+      action: 'begin',
+      workspaceRoot: normaliseWorkspaceRoot(args.workspaceRoot),
+      compileDbHash: args.compileDbHash,
+      ...(args.parserVersion ? { parserVersion: args.parserVersion } : {}),
+    });
+
+    const snapshotId = Number(text.match(/snapshotId\s*:\s*(\d+)/i)?.[1] ?? NaN);
+    if (!Number.isFinite(snapshotId)) {
+      throw new Error(text);
+    }
+
+    return {
+      snapshotId,
+      status: text.match(/status\s*:\s*([^\n]+)/i)?.[1]?.trim(),
+      createdAt: text.match(/createdAt\s*:\s*([^\n]+)/i)?.[1]?.trim(),
+      raw: text,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`intelligence_snapshot begin failed: ${message}`);
+  }
+}
+
+export async function commitSnapshot(args: CommitSnapshotArgs): Promise<void> {
+  try {
+    const { mcpUrl, sessionId } = await initMcpToolSession(args.workspaceRoot, args.mcpUrl, 'q-relation-tui-snapshot-commit');
+    const text = await callTool(mcpUrl, sessionId, 'intelligence_snapshot', {
+      action: 'commit',
+      snapshotId: args.snapshotId,
+    });
+
+    if (!/committed|status:\s*ready/i.test(text)) {
+      throw new Error(text);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`intelligence_snapshot commit failed for snapshot ${args.snapshotId}: ${message}`);
+  }
+}
+
+export async function checkSnapshot(args: CheckSnapshotArgs): Promise<CheckSnapshotResult> {
+  try {
+    const { mcpUrl, sessionId } = await initMcpToolSession(args.workspaceRoot, args.mcpUrl, 'q-relation-tui-snapshot-check');
+    const text = await callTool(mcpUrl, sessionId, 'intelligence_snapshot', {
+      action: 'check',
+      workspaceRoot: normaliseWorkspaceRoot(args.workspaceRoot),
+    });
+
+    const snapshotIdMatch = text.match(/snapshotId[=:\s]+(\d+)/i);
+    const snapshotId = snapshotIdMatch ? Number(snapshotIdMatch[1]) : 0;
+    const notFound = /no ready snapshot|not found|missing|status[=:\s]+missing/i.test(text);
+    return {
+      snapshotId,
+      exists: /snapshotId[=:\s]+\d+/i.test(text) && !notFound,
+      status: text.match(/status[=:\s]+([^\s\n]+)/i)?.[1]?.trim(),
+      supported: true,
+      raw: text,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const unsupported = /invalid enum value|action|check/i.test(message);
+    if (unsupported) {
+      return {
+        snapshotId: 0,
+        exists: false,
+        supported: false,
+        raw: message,
+      };
+    }
+    throw new Error(`intelligence_snapshot check failed: ${message}`);
+  }
+}
+
+export async function ingestWorkspace(args: IngestWorkspaceArgs): Promise<IngestWorkspaceResult> {
+  try {
+    const { mcpUrl, sessionId } = await initMcpToolSession(args.workspaceRoot, args.mcpUrl, 'q-relation-tui-ingest');
+    const text = await callTool(mcpUrl, sessionId, 'intelligence_ingest', {
+      workspaceRoot: normaliseWorkspaceRoot(args.workspaceRoot),
+      ...(args.compileDbHash ? { compileDbHash: args.compileDbHash } : {}),
+      ...(args.parserVersion ? { parserVersion: args.parserVersion } : {}),
+      ...(typeof args.fileLimit === 'number' ? { fileLimit: args.fileLimit } : {}),
+      ...(typeof args.syncProjection === 'boolean' ? { syncProjection: args.syncProjection } : {}),
+    });
+
+    if (/^unknown tool:\s*intelligence_ingest/i.test(text.trim())) {
+      throw new Error(text);
+    }
+
+    if (/^intelligence_ingest:\s*failed/i.test(text.trim())) {
+      throw new Error(text);
+    }
+
+    const snapshotId = Number(text.match(/Snapshot started:\s*id=(\d+)/i)?.[1] ?? NaN);
+    const extractedMatch = text.match(/Extracted:\s*symbols=(\d+)\s+types=(\d+)\s+edges=(\d+)/i);
+    const persistedMatch = text.match(/Persisted:\s*symbols=(\d+)\s+types=(\d+)\s+edges=(\d+)/i);
+
+    return {
+      snapshotId: Number.isFinite(snapshotId) ? snapshotId : undefined,
+      extracted: extractedMatch
+        ? {
+            symbols: Number(extractedMatch[1]),
+            types: Number(extractedMatch[2]),
+            edges: Number(extractedMatch[3]),
+          }
+        : undefined,
+      persisted: persistedMatch
+        ? {
+            symbols: Number(persistedMatch[1]),
+            types: Number(persistedMatch[2]),
+            edges: Number(persistedMatch[3]),
+          }
+        : undefined,
+      raw: text,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`intelligence_ingest failed: ${message}`);
+  }
+}
+
+export async function intelligenceQuery(args: IntelligenceQueryArgs): Promise<IntelligenceQueryResult> {
+  try {
+    const { mcpUrl, sessionId } = await initMcpToolSession(args.workspaceRoot, args.mcpUrl, 'q-relation-tui-intelligence-query');
+    const text = await callTool(mcpUrl, sessionId, 'intelligence_query', {
+      intent: args.intent,
+      snapshotId: typeof args.snapshotId === 'number' && args.snapshotId > 0
+        ? args.snapshotId
+        : getResolvedSnapshotId(args.workspaceRoot),
+      ...(args.params.symbol ? { apiName: args.params.symbol } : {}),
+      ...(args.params.structName ? { structName: args.params.structName } : {}),
+      ...(args.params.logLevel ? { logLevel: args.params.logLevel } : {}),
+      ...(args.params.filePath ? { filePath: args.params.filePath } : {}),
+      ...(typeof args.params.maxNodes === 'number' ? { limit: args.params.maxNodes } : {}),
+    });
+
+    const parsed = parseIntelligenceQueryPayload(text);
+    return {
+      status: parsed.status,
+      data: parsed.data,
+      provenance: parsed.provenance,
+      raw: text,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`intelligence_query failed: ${message}`);
+  }
+}
+
+/**
+ * Query logs emitted by an API.
+ * Returns log rows: { api_name, level, template, subsystem, file_path, line, confidence }
+ */
+export async function queryApiLogs(args: {
+  workspaceRoot: string;
+  apiName: string;
+  logLevel?: 'ERROR' | 'WARN' | 'INFO' | 'DEBUG' | 'VERBOSE' | 'TRACE';
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: args.logLevel ? 'find_api_logs_by_level' : 'find_api_logs',
+    params: {
+      symbol: args.apiName,
+      logLevel: args.logLevel,
+      maxNodes: 100,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+/**
+ * Query what structs a given API writes.
+ * Uses find_api_struct_writes (API-centric: src_symbol_name = apiName).
+ * Returns rows: { writer, target, edge_kind, confidence, derivation }
+ */
+export async function queryApiStructWrites(args: {
+  workspaceRoot: string;
+  apiName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_api_struct_writes',
+    params: {
+      symbol: args.apiName,
+      maxNodes: 50,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+/**
+ * Query what structs a given API reads.
+ * Uses find_api_struct_reads (API-centric: src_symbol_name = apiName).
+ * Returns rows: { reader, target, edge_kind, confidence, derivation }
+ */
+export async function queryApiStructReads(args: {
+  workspaceRoot: string;
+  apiName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_api_struct_reads',
+    params: {
+      symbol: args.apiName,
+      maxNodes: 50,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+/**
+ * Query which APIs write a given struct (struct-centric).
+ * Returns writer rows: { writer, target, edge_kind, confidence, derivation }
+ * @deprecated Use queryApiStructWrites for API-centric queries (what structs does API X write?)
+ */
+export async function queryStructWriters(args: {
+  workspaceRoot: string;
+  structName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_struct_writers',
+    params: {
+      structName: args.structName,
+      maxNodes: 50,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+function parseIntelligenceQueryPayload(raw: string): Omit<IntelligenceQueryResult, 'raw'> {
+  const payloadText = extractJsonObject(raw);
+  const parsed = JSON.parse(payloadText) as {
+    status?: IntelligenceQueryResult['status'];
+    data?: { nodes?: Array<Record<string, unknown>>; edges?: Array<Record<string, unknown>> };
+    provenance?: Record<string, unknown>;
+  };
+
+  const status = parsed.status;
+  if (!status || !['hit', 'enriched', 'llm_fallback', 'not_found', 'error'].includes(status)) {
+    throw new Error(`invalid intelligence_query status: ${String(status)}`);
+  }
+
+  const nodes = Array.isArray(parsed.data?.nodes) ? parsed.data.nodes : [];
+  const edges = Array.isArray(parsed.data?.edges) ? parsed.data.edges : [];
+
+  return {
+    status,
+    data: { nodes, edges },
+    ...(parsed.provenance ? { provenance: parsed.provenance } : {}),
+  };
+}
+
+function extractJsonObject(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    return trimmed;
+  }
+
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    return trimmed.slice(start, end + 1);
+  }
+
+  return trimmed;
+}
+
+/**
+ * Map an intelligence_query edge kind string to a SystemConnectionKind.
+ * Unknown values fall back to 'api_call'.
+ */
+function queryEdgeKindToConnectionKind(kind: unknown): SystemConnectionKind {
+  if (typeof kind !== 'string') return 'api_call';
+  return edgeKindToConnectionKind(kind) as SystemConnectionKind;
+}
+
+/**
+ * Map a backend EdgeKind (from intelligence_query GraphEdge.kind) to a
+ * BackendConnectionKind for the UI.
+ *
+ * EdgeKind values are defined in clangd-mcp/src/intelligence/contracts/common.ts.
+ * BackendConnectionKind values are defined in backend-types.ts.
+ *
+ * Handles two cases:
+ *   1. Backend EdgeKind semantic values (from intelligence contracts):
+ *      calls, indirect_calls, registers_callback, dispatches_to, reads_field,
+ *      writes_field, uses_macro, logs_event, operates_on_struct
+ *   2. BackendConnectionKind passthrough values already in UI form:
+ *      api_call, interface_registration, sw_thread_comm, hw_interrupt, etc.
+ *
+ * EdgeKind → BackendConnectionKind mapping:
+ *   calls              → api_call            (direct function call)
+ *   indirect_calls     → interface_registration (callback/indirect invocation)
+ *   registers_callback → interface_registration (callback registration site)
+ *   dispatches_to      → interface_registration (dispatch table entry)
+ *   reads_field        → custom              (struct field read)
+ *   writes_field       → custom              (struct field write)
+ *   uses_macro         → custom              (macro usage)
+ *   logs_event         → event               (log event emission)
+ *   operates_on_struct → custom              (struct operation)
+ *   <unknown>          → custom              (safe fallback for future EdgeKind additions)
+ */
+export function edgeKindToConnectionKind(kind: string): BackendConnectionKind {
+  switch (kind) {
+    // Backend EdgeKind semantic values
+    case 'calls':              return 'api_call';
+    case 'indirect_calls':     return 'interface_registration';
+    case 'registers_callback': return 'interface_registration';
+    case 'dispatches_to':      return 'interface_registration';
+    case 'reads_field':        return 'custom';
+    case 'writes_field':       return 'custom';
+    case 'uses_macro':         return 'custom';
+    case 'logs_event':         return 'event';
+    case 'operates_on_struct': return 'custom';
+    // BackendConnectionKind passthrough values (already in UI form)
+    case 'api_call':               return 'api_call';
+    case 'interface_registration': return 'interface_registration';
+    case 'sw_thread_comm':         return 'sw_thread_comm';
+    case 'hw_interrupt':           return 'hw_interrupt';
+    case 'hw_ring':                return 'hw_ring';
+    case 'ring_signal':            return 'ring_signal';
+    case 'event':                  return 'event';
+    case 'timer_callback':         return 'timer_callback';
+    case 'deferred_work':          return 'deferred_work';
+    case 'debugfs_op':             return 'debugfs_op';
+    case 'ioctl_dispatch':         return 'ioctl_dispatch';
+    case 'ring_completion':        return 'ring_completion';
+    case 'custom':                 return 'custom';
+    default:                       return 'custom';
+  }
+}
+
+/**
+ * Convert a who_calls_api IntelligenceQueryResult into CallerNode[].
+ *
+ * Returns ALL callers including registrars (interface_registration edges).
+ * The TUI renders them with distinct [REG] badges so the user can see both
+ * runtime callers and registration points in the same tree.
+ *
+ * Field mapping:
+ *   node.symbol  → CallerNode.caller
+ *   node.filePath → CallerNode.filePath  (fallback: '')
+ *   node.lineNumber → CallerNode.lineNumber (fallback: 0)
+ *   edge.kind    → CallerNode.connectionKind (via queryEdgeKindToConnectionKind)
+ *
+ * Target identification strategy (in priority order):
+ *   1. Node with kind='api' is the target API being queried.
+ *   2. Fallback: node that is only a destination (never a source) in the edge set.
+ *
+ * Only nodes that have edges pointing TO the target are emitted as CallerNodes.
+ */
+export function queryResultToCallerNodes(result: IntelligenceQueryResult): CallerNode[] {
+  const { nodes, edges } = result.data;
+  if (!nodes.length || !edges.length) return [];
+
+  // Build id → node map
+  const nodeById = new Map<string, Record<string, unknown>>();
+  for (const n of nodes) {
+    const id = String(n['id'] ?? '');
+    if (id) nodeById.set(id, n);
+  }
+
+  // Primary: nodes with kind='api' are the target API being queried
+  const apiNodeIds = new Set<string>();
+  for (const n of nodes) {
+    if (n['kind'] === 'api') {
+      const id = String(n['id'] ?? '');
+      if (id) apiNodeIds.add(id);
+    }
+  }
+
+  // Fallback: node that is only a destination (never a source)
+  const sourcesInEdges = new Set(edges.map((e) => String(e['from'] ?? '')));
+  const destIds = new Set(edges.map((e) => String(e['to'] ?? '')));
+  const topologyTargetIds = new Set([...destIds].filter((id) => !sourcesInEdges.has(id)));
+
+  const targetIds = apiNodeIds.size > 0 ? apiNodeIds : topologyTargetIds;
+
+  const out: CallerNode[] = [];
+  const seen = new Set<string>();
+
+  for (const edge of edges) {
+    const fromId = String(edge['from'] ?? '');
+    const toId = String(edge['to'] ?? '');
+    // Only emit edges pointing to a target node
+    if (!targetIds.has(toId)) continue;
+
+    const callerNode = nodeById.get(fromId);
+    if (!callerNode) continue;
+
+    const caller = String(callerNode['symbol'] ?? fromId);
+    const filePath = String(callerNode['filePath'] ?? '');
+    const lineNumber = Number(callerNode['lineNumber'] ?? 0);
+    const connectionKind = queryEdgeKindToConnectionKind(edge['kind']);
+    const viaRegistrationApi =
+      typeof edge['viaRegistrationApi'] === 'string' ? edge['viaRegistrationApi'] : undefined;
+
+    const key = `${caller}|${filePath}|${lineNumber}|${connectionKind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const node: CallerNode = { caller, filePath, lineNumber, connectionKind };
+    if (viaRegistrationApi !== undefined) node.viaRegistrationApi = viaRegistrationApi;
+    out.push(node);
+  }
+
+  return out;
+}
+
+/**
+ * Map runtime_caller_invocation_type_classification → SystemConnectionKind.
+ */
+function runtimeInvocationTypeToConnectionKind(invocationType: string): SystemConnectionKind {
+  switch (invocationType) {
+    case 'runtime_direct_call':                return 'api_call';
+    case 'runtime_callback_registration_call': return 'interface_registration';
+    case 'runtime_function_pointer_call':      return 'interface_registration';
+    case 'runtime_dispatch_table_call':        return 'interface_registration';
+    default:                                   return 'api_call';
+  }
+}
+
+/**
+ * Convert a who_calls_api_at_runtime IntelligenceQueryResult into CallerNode[].
+ *
+ * Field mapping:
+ *   node.runtime_caller_api_name                          → CallerNode.caller
+ *   node.runtime_caller_invocation_type_classification    → CallerNode.connectionKind
+ */
+export function queryResultToRuntimeCallerNodes(result: IntelligenceQueryResult): CallerNode[] {
+  const { nodes } = result.data;
+  if (!nodes.length) return [];
+
+  const out: CallerNode[] = [];
+  const seen = new Set<string>();
+
+  for (const n of nodes) {
+    const caller = String(n['runtime_caller_api_name'] ?? '');
+    if (!caller) continue;
+
+    const invocationType = String(n['runtime_caller_invocation_type_classification'] ?? '');
+    const connectionKind = runtimeInvocationTypeToConnectionKind(invocationType);
+
+    const key = `${caller}|${connectionKind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({
+      caller,
+      filePath: '',
+      lineNumber: 0,
+      symbolKind: 12, // Function
+      connectionKind,
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Convert a what_does_api_call IntelligenceQueryResult into CalleeNode[].
+ *
+ * Field mapping:
+ *   node.symbol     → CalleeNode.callee
+ *   node.filePath   → CalleeNode.filePath  (fallback: '')
+ *   node.lineNumber → CalleeNode.lineNumber (fallback: 0)
+ *   edge.kind       → CalleeNode.connectionKind (via edgeKindToConnectionKind)
+ *   edge.viaRegistrationApi → CalleeNode.viaRegistrationApi (optional)
+ *
+ * Only nodes that appear as edge destinations (edge.to) from the source
+ * node are emitted. The source node is identified as the node whose id does
+ * NOT appear as an edge destination (i.e. it is only a source).
+ */
+export function queryResultToCalleeNodes(result: IntelligenceQueryResult): CalleeNode[] {
+  const { nodes, edges } = result.data;
+  if (!nodes.length || !edges.length) return [];
+
+  // Build id → node map
+  const nodeById = new Map<string, Record<string, unknown>>();
+  for (const n of nodes) {
+    const id = String(n['id'] ?? '');
+    if (id) nodeById.set(id, n);
+  }
+
+  // Identify source node: the node that is only a source (never a destination)
+  const destIds = new Set(edges.map((e) => String(e['to'] ?? '')));
+  const sourceIds = new Set(edges.map((e) => String(e['from'] ?? '')));
+  // Source = node that appears as source but not as dest
+  const rootIds = new Set([...sourceIds].filter((id) => !destIds.has(id)));
+
+  const out: CalleeNode[] = [];
+  const seen = new Set<string>();
+
+  for (const edge of edges) {
+    const fromId = String(edge['from'] ?? '');
+    const toId = String(edge['to'] ?? '');
+    // Only emit edges originating from a root node
+    if (!rootIds.has(fromId)) continue;
+
+    const calleeNode = nodeById.get(toId);
+    if (!calleeNode) continue;
+
+    const callee = String(calleeNode['symbol'] ?? toId);
+    const filePath = String(calleeNode['filePath'] ?? '');
+    const lineNumber = Number(calleeNode['lineNumber'] ?? 0);
+    const connectionKind = queryEdgeKindToConnectionKind(edge['kind']);
+    const viaRegistrationApi =
+      typeof edge['viaRegistrationApi'] === 'string' ? edge['viaRegistrationApi'] : undefined;
+
+    const key = `${callee}|${filePath}|${lineNumber}|${connectionKind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({
+      callee,
+      filePath,
+      lineNumber,
+      connectionKind,
+      ...(viaRegistrationApi ? { viaRegistrationApi } : {}),
+    });
+  }
+
+  return out;
+}
+
 function parseJsonFile(filePath: string): any | null {
   try {
     return JSON.parse(readFileSync(filePath, 'utf8'));
@@ -489,6 +1581,30 @@ async function resolveMcpUrl(workspaceRoot: string): Promise<string> {
   throw new Error(
     `Could not resolve clangd-mcp endpoint. Set CLANGD_MCP_URL or ensure ${statePath} contains httpPort.`
   );
+}
+
+async function initMcpToolSession(
+  workspaceRoot: string,
+  mcpUrlOverride: string | undefined,
+  clientName: string,
+): Promise<{ mcpUrl: string; sessionId: string }> {
+  const normalizedRoot = normaliseWorkspaceRoot(workspaceRoot);
+  const mcpUrl = normalizeMcpUrl(mcpUrlOverride || (await resolveMcpUrl(normalizedRoot)));
+  const init = await sendRpc(mcpUrl, null, 'initialize', {
+    protocolVersion: '2024-11-05',
+    capabilities: {},
+    clientInfo: {
+      name: clientName,
+      version: '0.1.0',
+    },
+  });
+
+  const sessionId = init.sessionId;
+  if (!sessionId) {
+    throw new Error('MCP initialize did not return session id');
+  }
+
+  return { mcpUrl, sessionId };
 }
 
 async function tryAutoStartMcp(workspaceRoot: string, state: any) {
@@ -793,6 +1909,54 @@ function preferSymbolAlias(name: string): string {
   canonical = canonical.replace(/___[A-Za-z0-9_]+$/, '');
 
   return canonical || trimmed;
+}
+
+/**
+ * Build all alias variants of a symbol name for DB lookup.
+ * C firmware often has the same function under multiple names:
+ *   foo, _foo, __foo, foo___RAM, _foo___RAM
+ * Returns the canonical name first, then variants.
+ */
+function symbolAliasVariants(name: string): string[] {
+  const canonical = preferSymbolAlias(name);
+  const variants = new Set<string>([canonical]);
+  // Add leading-underscore variants
+  variants.add(`_${canonical}`);
+  variants.add(`__${canonical}`);
+  // Add ___RAM suffix variants (common in ROM-patched firmware)
+  variants.add(`${canonical}___RAM`);
+  variants.add(`_${canonical}___RAM`);
+  // Add the original name if different from canonical
+  if (name !== canonical) variants.add(name);
+  return [...variants];
+}
+
+/**
+ * Try an intelligence_query with the canonical name first, then alias variants.
+ * Returns the first result with data, or the last result if all return not_found.
+ */
+async function intelligenceQueryWithAliases(
+  args: Omit<IntelligenceQueryArgs, 'params'> & { params: IntelligenceQueryArgs['params'] },
+  workspaceRoot: string,
+  mcpUrl: string | undefined,
+): Promise<IntelligenceQueryResult> {
+  const symbol = args.params.symbol ?? '';
+  const variants = symbolAliasVariants(symbol);
+
+  let lastResult: IntelligenceQueryResult | null = null;
+  for (const variant of variants) {
+    const result = await intelligenceQuery({
+      ...args,
+      params: { ...args.params, symbol: variant },
+      workspaceRoot,
+      mcpUrl,
+    });
+    if (result.status === 'hit' || result.status === 'enriched') {
+      return result;
+    }
+    lastResult = result;
+  }
+  return lastResult ?? { status: 'not_found', data: { nodes: [], edges: [] }, raw: '' };
 }
 
 function isHoverUsable(firstLine: string): boolean {
@@ -1206,6 +2370,10 @@ function parseIndirectCallersFromText(
     triggerContext?: string;             // trigger-context: <source context>
     dispatchEventId?: string;            // event: WMI_CMD_* (dispatch-table endpoint)
     triggerOrigin?: string;              // trigger-origin: internal | external | host | firmware
+    // Resolved chain fields (from resolve:true)
+    dispatchFunction?: string;           // dispatch: <fn> at <file>:<line> — the runtime invoker
+    dispatchFilePath?: string;
+    dispatchLineNumber?: number;
   };
 
   type CallerNode = {
@@ -1238,15 +2406,34 @@ function parseIndirectCallersFromText(
   const flush = () => {
     if (!pending) return;
 
-    // Always emit the registrar node
-    out.push({
-      caller: pending.caller,
-      filePath: pending.filePath,
-      lineNumber: pending.lineNumber,
-      symbolKind: pending.symbolKind,
-      connectionKind: pending.connectionKind,
-      viaRegistrationApi: pending.viaRegistrationApi,
-    });
+    // If a resolved dispatch function is available (from resolve:true), emit it as the
+    // primary runtime caller — it is the function that actually invokes the fn-ptr at runtime.
+    // The registrar is kept as viaRegistrationApi context.
+    if (pending.dispatchFunction) {
+      const dispatchCaller = preferSymbolAlias(pending.dispatchFunction);
+      const dispatchKey = `${dispatchCaller}|api_call`;
+      if (!seenEventSources.has(dispatchKey)) {
+        seenEventSources.add(dispatchKey);
+        out.push({
+          caller: dispatchCaller,
+          filePath: pending.dispatchFilePath ?? pending.filePath,
+          lineNumber: pending.dispatchLineNumber ?? pending.lineNumber,
+          symbolKind: 12,
+          connectionKind: 'api_call',
+          viaRegistrationApi: pending.viaRegistrationApi ?? pending.caller,
+        });
+      }
+    } else {
+      // No dispatch function resolved — emit the registrar as the best available answer
+      out.push({
+        caller: pending.caller,
+        filePath: pending.filePath,
+        lineNumber: pending.lineNumber,
+        symbolKind: pending.symbolKind,
+        connectionKind: pending.connectionKind,
+        viaRegistrationApi: pending.viaRegistrationApi,
+      });
+    }
 
     // Explicit trigger node emitted only when backend supplies full trigger contract.
     if (pending.triggerType && pending.triggerId) {
@@ -1396,6 +2583,20 @@ function parseIndirectCallersFromText(
     const trigCtxMatch = line.match(/^\s+trigger-context:\s+(.+)/);
     if (trigCtxMatch) { pending.triggerContext = trigCtxMatch[1].trim(); continue; }
 
+    // "     dispatch: offldmgr_dispatch_data_path at src/offload_mgr.c:500 (high)"
+    // The dispatch function is the ACTUAL runtime invoker — the function that calls the
+    // fn-ptr at runtime. When present, it replaces the registrar as the primary caller.
+    const dispatchMatch = line.match(/^\s+dispatch:\s+(\S+)\s+at\s+(.*):(\d+)\s/);
+    if (dispatchMatch) {
+      const [, dispatchFn, dispatchRelPath, dispatchLineStr] = dispatchMatch;
+      pending.dispatchFunction = dispatchFn;
+      pending.dispatchFilePath = isAbsolute(dispatchRelPath)
+        ? dispatchRelPath
+        : join(workspaceRoot, dispatchRelPath);
+      pending.dispatchLineNumber = Number(dispatchLineStr);
+      continue;
+    }
+
     // Legacy clangd-mcp annotations are ignored; canonical contract is trigger-*.
   }
 
@@ -1479,8 +2680,9 @@ function rankIncomingCallers(
     const bTest = isLikelyTestPath(b.filePath) ? 1 : 0;
     if (aTest !== bTest) return aTest - bTest;
 
-    const aReg = a.connectionKind === 'interface_registration' ? 0 : 1;
-    const bReg = b.connectionKind === 'interface_registration' ? 0 : 1;
+    // Prioritize real runtime invokers/endpoints over registration-only wiring nodes.
+    const aReg = a.connectionKind === 'interface_registration' ? 1 : 0;
+    const bReg = b.connectionKind === 'interface_registration' ? 1 : 0;
     if (aReg !== bReg) return aReg - bReg;
 
     if (a.caller !== b.caller) return a.caller.localeCompare(b.caller);

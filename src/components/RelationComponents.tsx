@@ -51,6 +51,8 @@ export type TreeNode = {
   lineNumber?: number;
   symbolKind?: number;
   connectionKind?: SystemConnectionKind;
+  /** For interface_registration nodes: the registration API that wired this callback */
+  viaRegistrationApi?: string;
   parentId?: string;
   childrenIds: string[];
   loaded: boolean;
@@ -75,6 +77,7 @@ const COLORS = {
   fgDimSelected: '#a0c8f0',   // light blue — meta text when selected
   fgRoot:        '#a8d8a8',   // light green — root label
   fgError:       '#e06c75',   // red — error messages
+  fgWarning:     '#e5c07b',   // amber — warning messages
   fgLoading:     '#e5c07b',   // amber — loading indicator
 
   // Symbol kind colours
@@ -259,9 +262,10 @@ type RelationEdgeProps = {
   depth: number;
   isLast: boolean;
   connectionKind?: SystemConnectionKind;
+  viaRegistrationApi?: string;
 };
 
-export function RelationEdge({ mode, depth, isLast, connectionKind }: RelationEdgeProps) {
+export function RelationEdge({ mode, depth, isLast, connectionKind, viaRegistrationApi }: RelationEdgeProps) {
   const indent = '  '.repeat(depth);
   const branch = isLast ? '└' : '├';
   const line   = '─'.repeat(3);
@@ -272,7 +276,10 @@ export function RelationEdge({ mode, depth, isLast, connectionKind }: RelationEd
   let edgeLabel = '';
   let edgeLabelColor: string = COLORS.fgDim;
   
-  if (connectionKind === 'sw_thread_comm') {
+  if (connectionKind === 'interface_registration') {
+    edgeLabel = '[REG]';
+    edgeLabelColor = '#e06c75'; // red — registrar, not a runtime caller
+  } else if (connectionKind === 'sw_thread_comm') {
     edgeLabel = '[THR]';
     edgeLabelColor = '#56b6c2'; // cyan
   } else if (connectionKind === 'hw_interrupt') {
@@ -284,10 +291,18 @@ export function RelationEdge({ mode, depth, isLast, connectionKind }: RelationEd
   } else if (connectionKind === 'event') {
     edgeLabel = '[SIG]';
     edgeLabelColor = '#98c379'; // green
+  } else if (connectionKind === 'timer_callback') {
+    edgeLabel = '[TMR]';
+    edgeLabelColor = '#e5c07b'; // amber
   } else if (connectionKind === 'custom') {
     edgeLabel = '[IND]';
     edgeLabelColor = '#7f8c8d'; // dim
   }
+
+  // For registrars, show the registration API as context
+  const viaLabel = connectionKind === 'interface_registration' && viaRegistrationApi
+    ? ` via:${viaRegistrationApi}`
+    : '';
 
   return (
     <box flexDirection="row" width="100%" marginLeft={depth * 4}>
@@ -299,6 +314,11 @@ export function RelationEdge({ mode, depth, isLast, connectionKind }: RelationEd
       {edgeLabel && (
         <text fg={edgeLabelColor} marginLeft={1}>
           {edgeLabel}
+        </text>
+      )}
+      {viaLabel && (
+        <text fg={COLORS.fgDim} marginLeft={1}>
+          {viaLabel}
         </text>
       )}
     </box>
@@ -453,6 +473,7 @@ export function RelationTree({
               depth={depth + 1}
               isLast={isLast}
               connectionKind={childNode?.connectionKind}
+              viaRegistrationApi={childNode?.viaRegistrationApi}
             />
             {/* Recursive child */}
             <RelationTree
@@ -546,6 +567,7 @@ type RelationFooterProps = {
   lastError: string | null;
   showHelp: boolean;
   animTick: number;
+  workspaceRoot?: string;
 };
 
 // Key hint pairs: [key, description]
@@ -554,6 +576,8 @@ const KEY_HINTS_SHORT: Array<[string, string]> = [
   ['l', 'expand'],
   ['h', 'parent'],
   ['Enter', 'open'],
+  ['L', 'logs'],
+  ['W', 'struct writes'],
   ['r', 'refresh'],
   ['?', 'help'],
   ['q', 'quit'],
@@ -564,10 +588,13 @@ const KEY_HINTS_FULL: Array<[string, string]> = [
   ['l →', 'expand'],
   ['h ←', 'collapse/parent'],
   ['Enter/o', 'open in editor'],
+  ['L', 'show API logs'],
+  ['W', 'show struct writes'],
   ['r', 'refresh'],
   ['Shift+W/A/S/D', 'pan'],
   ['?', 'hide help'],
   ['q/Esc', 'quit'],
+  // Edge badges: [REG]=registrar  [IRQ]=hw_interrupt  [THR]=thread  [RNG]=ring  [SIG]=event  [TMR]=timer
 ];
 
 function KeyHints({ hints }: { hints: Array<[string, string]> }) {
@@ -589,8 +616,10 @@ export function RelationFooter({
   lastError,
   showHelp,
   animTick,
+  workspaceRoot,
 }: RelationFooterProps) {
   const hints = showHelp ? KEY_HINTS_FULL : KEY_HINTS_SHORT;
+  const hasWorkspaceWarning = !workspaceRoot;
 
   return (
     <box
@@ -615,6 +644,11 @@ export function RelationFooter({
           <>
             <text fg={COLORS.fgError} attributes={1}>{'✖ '}</text>
             <text fg={COLORS.fgError} truncate>{lastError}</text>
+          </>
+        ) : hasWorkspaceWarning ? (
+          <>
+            <text fg={COLORS.fgWarning} attributes={1}>{'⚠ '}</text>
+            <text fg={COLORS.fgWarning}>{'No WORKSPACE_ROOT configured — logs and struct queries disabled'}</text>
           </>
         ) : (
           <text fg={COLORS.fgDim}>{'Ready'}</text>

@@ -22,9 +22,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { ScrollBoxRenderable } from '@opentui/core';
 import type { FlatRelationItem, QueryMode, RelationMode } from '../lib/types';
+import type { LogRow, StructWriterRow } from '../lib/intelligence-query-adapters';
 import { sendBridgeMessage } from '../lib/bridge';
 import { logError, logInfo, logWarn } from '../lib/logger';
 import { BothRelationWindow } from './BothRelationWindow';
+import { LogPanel } from './LogPanel';
+import { StructPanel } from './StructPanel';
 import {
   RelationHeader,
   RelationFooter,
@@ -60,6 +63,9 @@ type Props = {
     filePath: string;
     lineNumber: number;
   }) => Promise<string>;
+  requestLogs?: (apiName: string) => Promise<LogRow[]>;
+  requestStructWrites?: (apiName: string) => Promise<StructWriterRow[]>;
+  workspaceRoot?: string;
   onOpenLocation: (item: FlatRelationItem) => void;
   onRefresh: () => void;
 };
@@ -79,6 +85,9 @@ export function RelationWindow({
   outgoingItems,
   requestExpand,
   requestHover,
+  requestLogs,
+  requestStructWrites,
+  workspaceRoot,
   onOpenLocation,
   onRefresh,
 }: Props) {
@@ -104,6 +113,18 @@ export function RelationWindow({
   const [lastError, setLastError] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [animTick, setAnimTick] = useState(0);
+  const [logPanel, setLogPanel] = useState<{
+    apiName: string;
+    rows: LogRow[];
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
+  const [structPanel, setStructPanel] = useState<{
+    apiName: string;
+    rows: StructWriterRow[];
+    loading: boolean;
+    error: string | null;
+  } | null>(null);
 
   // ── Refs ────────────────────────────────────────────────────────────────────
   const scrollRef = useRef<ScrollBoxRenderable>(null);
@@ -139,6 +160,7 @@ export function RelationWindow({
         lineNumber: item.lineNumber,
         symbolKind: item.symbolKind,
         connectionKind: item.connectionKind,
+        viaRegistrationApi: item.viaRegistrationApi,
         parentId: rid,
         childrenIds: [],
         loaded: false,
@@ -307,6 +329,7 @@ export function RelationWindow({
             lineNumber: child.lineNumber,
             symbolKind: child.symbolKind,
             connectionKind: child.connectionKind,
+            viaRegistrationApi: child.viaRegistrationApi,
             parentId: node.id,
             childrenIds: [],
             loaded: false,
@@ -388,6 +411,8 @@ export function RelationWindow({
     | 'open'
     | 'help'
     | 'escape'
+    | 'logs'
+    | 'struct'
     | null => {
     const raw = eventRawText(event);
     const name = typeof event?.name === 'string' ? event.name : '';
@@ -403,6 +428,8 @@ export function RelationWindow({
     if (name === 'l' && seq === 'l' && raw === 'l') return 'right';
     if (name === 'o' && seq === 'o' && raw === 'o') return 'open';
     if (name === '?' && seq === '?' && raw === '?') return 'help';
+    if (name === 'L' && seq === 'L' && raw === 'L') return 'logs';
+    if (name === 'W' && seq === 'W' && raw === 'W') return 'struct';
 
     // Arrow keys: accept canonical escape sequences only.
     if ((name === 'down' || seq === '\u001b[B') && raw === '\u001b[B') return 'down';
@@ -438,12 +465,69 @@ export function RelationWindow({
       return;
     }
 
-    // Close help on Esc (do not exit the TUI process)
+    // Close struct panel, log panel or help on Esc (do not exit the TUI process)
     if (key === 'escape') {
+      if (structPanel) {
+        logInfo('app', 'struct panel closed via escape');
+        setStructPanel(null);
+        return;
+      }
+      if (logPanel) {
+        logInfo('app', 'log panel closed via escape');
+        setLogPanel(null);
+        return;
+      }
       if (showHelp) {
         logInfo('app', 'help closed via escape');
         setShowHelp(false);
       }
+      return;
+    }
+
+    // Open log panel for selected node
+    if (key === 'logs') {
+      withActionGate(() => {
+        const node = nodes[selectedId];
+        if (!node) return;
+        const apiName = node.label;
+        logInfo('app', 'log panel requested', { apiName });
+        setLogPanel({ apiName, rows: [], loading: true, error: null });
+        if (!requestLogs) {
+          setLogPanel({ apiName, rows: [], loading: false, error: 'requestLogs not configured' });
+          return;
+        }
+        void requestLogs(apiName).then((rows) => {
+          setLogPanel({ apiName, rows, loading: false, error: null });
+        }).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          logError('app', 'log panel fetch failed', { apiName, error: msg });
+          setLogPanel({ apiName, rows: [], loading: false, error: msg });
+        });
+      });
+      return;
+    }
+
+    // Open struct panel for selected node
+    if (key === 'struct') {
+      withActionGate(async () => {
+        const node = nodes[selectedId];
+        if (!node || node.id === rootId) return;
+        const apiName = node.label;
+        logInfo('app', 'struct panel requested', { apiName });
+        setStructPanel({ apiName, rows: [], loading: true, error: null });
+        try {
+          if (requestStructWrites) {
+            const rows = await requestStructWrites(apiName);
+            setStructPanel((prev) => prev ? { ...prev, rows, loading: false } : null);
+          } else {
+            setStructPanel((prev) => prev ? { ...prev, loading: false, error: 'requestStructWrites not configured' } : null);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logError('app', 'struct panel fetch failed', { apiName, error: msg });
+          setStructPanel((prev) => prev ? { ...prev, loading: false, error: msg } : null);
+        }
+      });
       return;
     }
 
@@ -517,7 +601,48 @@ export function RelationWindow({
         lastError={lastError}
         showHelp={showHelp}
         animTick={animTick}
+        workspaceRoot={workspaceRoot}
       />
+
+      {/* ── Log panel overlay ── */}
+      {logPanel && (
+        <box
+          position="absolute"
+          top={2}
+          left={2}
+          width="90%"
+          height="80%"
+          zIndex={10}
+        >
+          <LogPanel
+            apiName={logPanel.apiName}
+            rows={logPanel.rows}
+            loading={logPanel.loading}
+            error={logPanel.error}
+            onClose={() => setLogPanel(null)}
+          />
+        </box>
+      )}
+
+      {/* ── Struct panel overlay ── */}
+      {structPanel && (
+        <box
+          position="absolute"
+          top={3}
+          left={3}
+          width="90%"
+          height="80%"
+          zIndex={11}
+        >
+          <StructPanel
+            apiName={structPanel.apiName}
+            rows={structPanel.rows}
+            loading={structPanel.loading}
+            error={structPanel.error}
+            onClose={() => setStructPanel(null)}
+          />
+        </box>
+      )}
     </box>
   );
 }
