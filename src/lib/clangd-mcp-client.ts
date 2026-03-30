@@ -78,7 +78,7 @@ const SYMBOL_KIND_MAP: Record<string, number> = {
 export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<BackendRelationPayload> {
   const workspaceRoot = query.workspaceRoot ? resolve(query.workspaceRoot) : findWorkspaceRoot(query.filePath);
   const mcpUrl = normalizeMcpUrl(query.mcpUrl || (await resolveMcpUrl(workspaceRoot)));
-  await ensureSnapshotInitialized(workspaceRoot, mcpUrl);
+  await ensureSnapshotInitializedForWorkspace(workspaceRoot, mcpUrl);
   logInfo('backend', 'resolved mcp endpoint', { workspaceRoot, mcpUrl, mode: query.mode });
 
   const init = await sendRpc(mcpUrl, null, 'initialize', {
@@ -205,7 +205,8 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
         targetSymbol: root.name,
         workspaceRoot,
       });
-      const runtimeCallers = parseRuntimeFlowToCallers(runtimeFlowText, workspaceRoot);
+      const runtimeCallers = parseRuntimeFlowToCallers(runtimeFlowText, workspaceRoot)
+        .filter(isUsableIncomingCaller);
       if (runtimeCallers.length > 0) {
         calledBy = runtimeCallers;
         logInfo('backend', 'runtime-flow-query-success', {
@@ -247,7 +248,8 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
           ) {
             throw new Error('no runtime callers from who_calls_api_at_runtime');
           }
-          calledBy = queryResultToRuntimeCallerNodes(queryResult);
+          calledBy = queryResultToRuntimeCallerNodes(queryResult)
+            .filter(isUsableIncomingCaller);
           if (calledBy.length === 0) {
             throw new Error('who_calls_api_at_runtime returned no parseable runtime callers — falling back to static graph');
           }
@@ -357,7 +359,8 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
       }
     }
 
-    calledBy = rankIncomingCallers(dedupeIncomingByCanonicalCaller(calledBy));
+    calledBy = rankIncomingCallers(dedupeIncomingByCanonicalCaller(calledBy))
+      .filter(isUsableIncomingCaller);
 
     // Show BOTH runtime callers AND registrars in the tree.
     // The TUI distinguishes them by connectionKind:
@@ -515,6 +518,24 @@ function parseRuntimeFlowToCallers(
   }
 }
 
+function isUnknownPlaceholderCallerName(name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    normalized === '(unknown)' ||
+    normalized === 'unknown' ||
+    normalized === '(unknown-registrar)' ||
+    normalized === 'unknown-registrar' ||
+    normalized.includes('unknown registrar')
+  );
+}
+
+function isUsableIncomingCaller(
+  caller: NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number],
+): boolean {
+  return !isUnknownPlaceholderCallerName(caller.caller);
+}
+
 /**
  * Parse the unified get_callers response into CallerNode[].
  * 
@@ -572,15 +593,18 @@ function parseGetCallersResponse(
       if (callerRole === 'registrar') {
         return 'interface_registration';
       }
-      
-      // Map runtime invocation types
+
+      // Map runtime invocation types to their specific connection kinds
+      // so the TUI renders them with the right badge (not as [REG])
       switch (invocationType) {
         case 'runtime_direct_call':
         case 'direct_call':
           return 'api_call';
-        case 'runtime_callback_registration_call':
-        case 'runtime_function_pointer_call':
         case 'runtime_dispatch_table_call':
+          return 'interface_registration';
+        case 'runtime_callback_registration_call':
+          return 'timer_callback';
+        case 'runtime_function_pointer_call':
           return 'interface_registration';
         case 'interface_registration':
           return 'interface_registration';
@@ -889,6 +913,8 @@ export type IntelligenceQueryIntent =
   | 'find_api_logs_by_level'
   | 'find_struct_writers'
   | 'find_struct_readers'
+  | 'find_api_struct_writes'
+  | 'find_api_struct_reads'
   | 'current_structure_runtime_writers_of_structure'
   | 'current_structure_runtime_readers_of_structure';
 
@@ -931,7 +957,7 @@ export function resetSnapshotState(): void {
   snapshotInitByWorkspace.clear();
 }
 
-async function ensureSnapshotInitialized(workspaceRoot: string, mcpUrl?: string): Promise<number> {
+async function ensureSnapshotInitializedForWorkspace(workspaceRoot: string, mcpUrl?: string): Promise<number> {
   const root = normaliseWorkspaceRoot(workspaceRoot);
   const pending = snapshotInitByWorkspace.get(root);
   if (pending) return pending;
@@ -940,6 +966,10 @@ async function ensureSnapshotInitialized(workspaceRoot: string, mcpUrl?: string)
     .finally(() => snapshotInitByWorkspace.delete(root));
   snapshotInitByWorkspace.set(root, init);
   return init;
+}
+
+export async function ensureSnapshotInitialized(args: { workspaceRoot: string; mcpUrl?: string }): Promise<number> {
+  return ensureSnapshotInitializedForWorkspace(args.workspaceRoot, args.mcpUrl);
 }
 
 async function ensureSnapshotInitializedInner(workspaceRoot: string, mcpUrl?: string): Promise<number> {
@@ -1407,13 +1437,22 @@ export function queryResultToCallerNodes(result: IntelligenceQueryResult): Calle
 
 /**
  * Map runtime_caller_invocation_type_classification → SystemConnectionKind.
+ *
+ * These are RUNTIME CALLERS (callerRole=runtime_caller from the backend).
+ * Map each to the most specific connection kind so the TUI can render them
+ * with the right badge/colour — NOT as interface_registration (registrar).
+ *
+ *   runtime_direct_call                → api_call           (direct fn call at runtime)
+ *   runtime_dispatch_table_call        → interface_registration (fn-ptr via dispatch table)
+ *   runtime_callback_registration_call → timer_callback     (timer/callback mechanism)
+ *   runtime_function_pointer_call      → interface_registration (generic fn-ptr call)
  */
 function runtimeInvocationTypeToConnectionKind(invocationType: string): SystemConnectionKind {
   switch (invocationType) {
     case 'runtime_direct_call':                return 'api_call';
-    case 'runtime_callback_registration_call': return 'interface_registration';
-    case 'runtime_function_pointer_call':      return 'interface_registration';
     case 'runtime_dispatch_table_call':        return 'interface_registration';
+    case 'runtime_callback_registration_call': return 'timer_callback';
+    case 'runtime_function_pointer_call':      return 'interface_registration';
     default:                                   return 'api_call';
   }
 }
