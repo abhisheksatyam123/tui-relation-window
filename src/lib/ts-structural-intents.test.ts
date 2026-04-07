@@ -102,7 +102,7 @@ describe('ts-structural-intents — ts-core edge metadata shapes', () => {
     expect(typeOnly.importType).toBe(true);
   });
 
-  it('calls edges carry resolved + resolutionKind (D1, D5, D10, D15-D21)', () => {
+  it('calls edges carry resolved + resolutionKind + flags (D1, D5, D10, D15–D34)', () => {
     type ResolutionKind =
       | 'named-import'
       | 'default-import'
@@ -115,21 +115,46 @@ describe('ts-structural-intents — ts-core edge metadata shapes', () => {
       | 'local'
       | 'jsx-component'
       | 'jsx-namespace-component'
+      | 'constructor'
       | 'bare'
       | 'member'
       | 'raw';
-    type CallsMeta = { resolved?: boolean; resolutionKind?: ResolutionKind; jsxTag?: string };
+    type CallsMeta = {
+      resolved?: boolean;
+      resolutionKind?: ResolutionKind;
+      // JSX-specific
+      jsxTag?: string;
+      props?: string[];
+      hasSpread?: boolean;
+      // Constructor-specific
+      ctorName?: string;
+      // Call-shape flags
+      taggedTemplate?: boolean;
+      awaited?: boolean;
+      yielded?: boolean;
+      delegated?: boolean;
+    };
 
     const valid: CallsMeta[] = [
       { resolved: true, resolutionKind: 'named-import' },
       { resolved: true, resolutionKind: 'this-method' },
-      { resolved: true, resolutionKind: 'jsx-component', jsxTag: 'Header' },
-      { resolved: true, resolutionKind: 'jsx-namespace-component', jsxTag: 'Tabs.Item' },
+      { resolved: true, resolutionKind: 'jsx-component', jsxTag: 'Header', props: ['title'] },
+      {
+        resolved: true,
+        resolutionKind: 'jsx-namespace-component',
+        jsxTag: 'Tabs.Item',
+        props: ['onClick'],
+        hasSpread: true,
+      },
       { resolved: true, resolutionKind: 'param-member' },
       { resolved: true, resolutionKind: 'var-member' },
+      { resolved: true, resolutionKind: 'constructor', ctorName: 'Greeter' },
+      { resolved: true, resolutionKind: 'named-import', taggedTemplate: true },
+      { resolved: true, resolutionKind: 'named-member', awaited: true },
+      { resolved: true, resolutionKind: 'named-member', yielded: true, delegated: true },
       { resolved: false, resolutionKind: 'member' },
     ];
-    expect(valid.length).toBe(7);
+    expect(valid.length).toBe(11);
   });
 
   it('references_type edges carry fieldRef / aliasRef / inferredFromNew flags', () => {
@@ -207,5 +232,134 @@ describe('ts-structural-intents — query helper signatures', () => {
     };
     expect(args.workspaceRoot).toBe('/tmp/ws');
     expect(args.moduleName).toBe('module:src/x.ts');
+  });
+});
+
+describe('ts-structural-intents — D28 / D36–D44 query intent contract', () => {
+  // The intents below were added to clangd-mcp's QueryIntent union
+  // after the original D1–D21 batch. They're not yet typed into
+  // tui-relation-window's IntelligenceQueryIntent (the user's edits
+  // there are still in-progress), but they work via the MCP boundary
+  // because intent strings are passed through unchanged.
+  //
+  // This block documents the wire format so future merges have a
+  // reference for which intents to add to the typed union.
+
+  type WhenSnapshotWide =
+    | 'find_import_cycles'
+    | 'find_top_imported_modules'
+    | 'find_top_called_functions'
+    | 'find_module_entry_points'
+    | 'find_dead_exports'
+    | 'find_symbols_by_name'
+    | 'find_symbols_by_kind';
+
+  type WhenPerSymbol =
+    | 'find_type_dependencies'
+    | 'find_type_consumers'
+    | 'find_transitive_dependencies'
+    | 'find_call_chain'
+    | 'find_symbol_at_location';
+
+  it('snapshot-wide intents do not need an apiName', () => {
+    const intents: WhenSnapshotWide[] = [
+      'find_import_cycles',
+      'find_top_imported_modules',
+      'find_top_called_functions',
+      'find_module_entry_points',
+      'find_dead_exports',
+      'find_symbols_by_name',
+      'find_symbols_by_kind',
+    ];
+    expect(intents.length).toBe(7);
+  });
+
+  it('per-symbol intents need an apiName (or other shape)', () => {
+    const intents: WhenPerSymbol[] = [
+      'find_type_dependencies',
+      'find_type_consumers',
+      'find_transitive_dependencies',
+      'find_call_chain',
+      'find_symbol_at_location',
+    ];
+    expect(intents.length).toBe(5);
+  });
+
+  it('find_call_chain takes srcApi/dstApi/depth on the request', () => {
+    type CallChainRequest = {
+      intent: 'find_call_chain';
+      snapshotId: number;
+      srcApi: string;
+      dstApi: string;
+      depth?: number;
+      limit?: number;
+    };
+    const req: CallChainRequest = {
+      intent: 'find_call_chain',
+      snapshotId: 1,
+      srcApi: 'module:src/a.ts#foo',
+      dstApi: 'module:src/b.ts#bar',
+      depth: 6,
+    };
+    expect(req.intent).toBe('find_call_chain');
+  });
+
+  it('find_symbol_at_location takes filePath/lineNumber on the request', () => {
+    type LocationRequest = {
+      intent: 'find_symbol_at_location';
+      snapshotId: number;
+      filePath: string;
+      lineNumber: number;
+      limit?: number;
+    };
+    const req: LocationRequest = {
+      intent: 'find_symbol_at_location',
+      snapshotId: 1,
+      filePath: '/abs/src/foo.ts',
+      lineNumber: 42,
+    };
+    expect(req.intent).toBe('find_symbol_at_location');
+  });
+
+  it('find_call_chain row shape includes path_index and chain_depth', () => {
+    type CallChainRow = {
+      kind: 'function';
+      canonical_name: string;
+      caller: string;
+      callee: string;
+      edge_kind: 'calls';
+      path_index: number;
+      chain_depth: number;
+    };
+    const row: CallChainRow = {
+      kind: 'function',
+      canonical_name: 'module:src/a.ts#foo',
+      caller: 'module:src/a.ts#foo',
+      callee: 'module:src/b.ts#bar',
+      edge_kind: 'calls',
+      path_index: 0,
+      chain_depth: 2,
+    };
+    expect(row.path_index).toBe(0);
+  });
+
+  it('top-N row shape includes incoming_count', () => {
+    type TopNRow = {
+      kind: string;
+      canonical_name: string;
+      caller: null;
+      callee: string;
+      edge_kind: 'imports' | 'calls';
+      incoming_count: number;
+    };
+    const row: TopNRow = {
+      kind: 'module',
+      canonical_name: 'module:src/util.ts',
+      caller: null,
+      callee: 'module:src/util.ts',
+      edge_kind: 'imports',
+      incoming_count: 47,
+    };
+    expect(row.incoming_count).toBe(47);
   });
 });
