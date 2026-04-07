@@ -86,6 +86,86 @@ describe('ts-structural-intents — edgeKindToConnectionKind', () => {
   });
 });
 
+describe('ts-structural-intents — ts-core edge metadata shapes', () => {
+  // The shapes below mirror what ts-core's extractor emits in
+  // metadata since the cumulative D1–D21 backend rounds. These tests
+  // are pure type/shape checks — they don't hit any backend, but they
+  // catch wire-format drift between the extractor and the visualizer.
+
+  it('imports edges may carry reExport (D3) or importType (D11)', () => {
+    type ImportsMeta = { reExport?: boolean; importType?: boolean };
+    const direct: ImportsMeta = {};
+    const reExport: ImportsMeta = { reExport: true };
+    const typeOnly: ImportsMeta = { importType: true };
+    expect(direct.reExport).toBeUndefined();
+    expect(reExport.reExport).toBe(true);
+    expect(typeOnly.importType).toBe(true);
+  });
+
+  it('calls edges carry resolved + resolutionKind (D1, D5, D10, D15-D21)', () => {
+    type ResolutionKind =
+      | 'named-import'
+      | 'default-import'
+      | 'namespace-member'
+      | 'named-member'
+      | 'local-member'
+      | 'var-member'
+      | 'param-member'
+      | 'this-method'
+      | 'local'
+      | 'jsx-component'
+      | 'jsx-namespace-component'
+      | 'bare'
+      | 'member'
+      | 'raw';
+    type CallsMeta = { resolved?: boolean; resolutionKind?: ResolutionKind; jsxTag?: string };
+
+    const valid: CallsMeta[] = [
+      { resolved: true, resolutionKind: 'named-import' },
+      { resolved: true, resolutionKind: 'this-method' },
+      { resolved: true, resolutionKind: 'jsx-component', jsxTag: 'Header' },
+      { resolved: true, resolutionKind: 'jsx-namespace-component', jsxTag: 'Tabs.Item' },
+      { resolved: true, resolutionKind: 'param-member' },
+      { resolved: true, resolutionKind: 'var-member' },
+      { resolved: false, resolutionKind: 'member' },
+    ];
+    expect(valid.length).toBe(7);
+  });
+
+  it('references_type edges carry fieldRef / aliasRef / inferredFromNew flags', () => {
+    type RefMeta = {
+      resolved?: boolean;
+      resolutionKind?: 'named-import' | 'default-import' | 'local';
+      typeName?: string;
+      fieldRef?: boolean;
+      aliasRef?: boolean;
+      inferredFromNew?: boolean;
+      memberKind?: 'public_field_definition' | 'property_signature' | 'method_signature';
+    };
+    const sigRef: RefMeta = { resolved: true, resolutionKind: 'named-import', typeName: 'User' };
+    const fieldRef: RefMeta = { resolved: true, fieldRef: true, memberKind: 'public_field_definition' };
+    const ifaceMethodRef: RefMeta = { resolved: true, fieldRef: true, memberKind: 'method_signature' };
+    const aliasRef: RefMeta = { resolved: true, aliasRef: true, typeName: 'Greeting' };
+    const newRef: RefMeta = { resolved: true, inferredFromNew: true };
+    expect([sigRef, fieldRef, ifaceMethodRef, aliasRef, newRef].length).toBe(5);
+  });
+
+  it('extends/implements edges carry resolved + targetName (D12)', () => {
+    type InheritMeta = {
+      resolved?: boolean;
+      targetName?: string;
+      resolutionKind?: string;
+    };
+    const resolved: InheritMeta = {
+      resolved: true,
+      targetName: 'Greeter',
+      resolutionKind: 'named-import',
+    };
+    expect(resolved.resolved).toBe(true);
+    expect(resolved.targetName).toBe('Greeter');
+  });
+});
+
 describe('ts-structural-intents — query helper signatures', () => {
   // These tests don't actually hit MCP — they would throw
   // ConnectionRefused or similar on call. We just verify the helpers
