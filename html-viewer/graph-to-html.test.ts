@@ -493,6 +493,9 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     expect(html).toContain('id="health-struct-cycles-row"')
     expect(html).toContain('id="health-unused-fields-row"')
     expect(html).toContain('id="health-orphan-types-row"')
+    // Phase 3w + 3x rows added later
+    expect(html).toContain('id="health-recursive-row"')
+    expect(html).toContain('id="health-inline-row"')
     // The function that fills them in
     expect(html).toContain("function buildHealthBadge")
     expect(html).toContain("buildHealthBadge()")

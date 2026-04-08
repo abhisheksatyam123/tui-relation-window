@@ -605,6 +605,12 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <div class="stat health-row" id="health-orphan-types-row" data-health="orphan-types">
       <span class="label">untouched types</span><span id="health-orphan-types">0</span>
     </div>
+    <div class="stat health-row" id="health-recursive-row" data-health="recursive">
+      <span class="label">self-recursive</span><span id="health-recursive">0</span>
+    </div>
+    <div class="stat health-row" id="health-inline-row" data-health="inline">
+      <span class="label">inline candidates</span><span id="health-inline">0</span>
+    </div>
 
     <h2>Search</h2>
     <input id="search" type="search" placeholder="canonical name…" />
@@ -2101,6 +2107,54 @@ function buildHealthBadge() {
     orphanTypeNodes.push(n.id);
   }
 
+  // Step 5: self-recursive methods (Phase 3x). Walk every calls
+  // edge looking for src == dst on a function/method node.
+  const recursiveNodes = [];
+  {
+    const seen = new Set();
+    for (const l of links) {
+      if (l.kind !== "calls") continue;
+      const s = typeof l.source === "object" ? l.source.id : l.source;
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      if (s !== t) continue;
+      if (seen.has(s)) continue;
+      const node = nodeById.get(s);
+      if (!node) continue;
+      if (node.kind !== "function" && node.kind !== "method") continue;
+      seen.add(s);
+      recursiveNodes.push(s);
+    }
+  }
+
+  // Step 6: inline candidates (Phase 3w). Methods called by exactly
+  // one OTHER method (excluding self-recursion). The walker counts
+  // distinct callers per callee, then keeps callees with exactly 1.
+  const inlineCandidateNodes = [];
+  {
+    // callee → Set of caller ids (excluding self-calls)
+    const callersOf = new Map();
+    for (const l of links) {
+      if (l.kind !== "calls") continue;
+      const s = typeof l.source === "object" ? l.source.id : l.source;
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      if (s === t) continue;
+      const callerNode = nodeById.get(s);
+      const calleeNode = nodeById.get(t);
+      if (!callerNode || !calleeNode) continue;
+      if (callerNode.kind !== "function" && callerNode.kind !== "method") continue;
+      if (calleeNode.kind !== "function" && calleeNode.kind !== "method") continue;
+      let set = callersOf.get(t);
+      if (!set) {
+        set = new Set();
+        callersOf.set(t, set);
+      }
+      set.add(s);
+    }
+    for (const [callee, callers] of callersOf) {
+      if (callers.size === 1) inlineCandidateNodes.push(callee);
+    }
+  }
+
   // Render each row, wiring a click handler that focuses the first
   // instance when the count is > 0.
   const renderRow = (rowId, valueId, nodes) => {
@@ -2130,6 +2184,8 @@ function buildHealthBadge() {
   renderRow("health-struct-cycles-row", "health-struct-cycles", structCycleNodes);
   renderRow("health-unused-fields-row", "health-unused-fields", unusedFieldNodes);
   renderRow("health-orphan-types-row", "health-orphan-types", orphanTypeNodes);
+  renderRow("health-recursive-row", "health-recursive", recursiveNodes);
+  renderRow("health-inline-row", "health-inline", inlineCandidateNodes);
 }
 
 // Phase 3o-frontend: viewer-side companion to find_top_field_writers
