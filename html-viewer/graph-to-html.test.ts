@@ -397,6 +397,41 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3j: function/method data footprint section is wired into showInfo", () => {
+    // The data footprint surfaces reads_field/writes_field outgoing
+    // edges in a dedicated section when the focused node is a
+    // function or method. This is the API ↔ data join the unified
+    // visualization story is built around — pin the markers so a
+    // future refactor doesn't silently lose them.
+    const html = graphJsonToHtml(fixture)
+    // The data-footprint section is conditional on the focused
+    // node's kind, so the plumbing has to be inlined as code (not
+    // as a static DOM marker).
+    expect(html).toContain('"function" || d.kind === "method"')
+    expect(html).toContain('"section-title">Data footprint')
+    // The reads/writes summary counts pull from the link arrays
+    expect(html).toContain('"reads_field"')
+    expect(html).toContain('"writes_field"')
+    // Per-row CSS hooks
+    expect(html).toContain(".data-footprint-summary")
+    expect(html).toContain(".data-footprint-reads")
+    expect(html).toContain(".data-footprint-writes")
+    expect(html).toContain(".data-footprint-group")
+    expect(html).toContain(".data-footprint-label")
+    // The clickable rows reuse the existing .neighbor-row class so
+    // the showInfo click handler picks them up unchanged
+    expect(html).toContain('<span class="kind">R</span>')
+    expect(html).toContain('<span class="kind">W</span>')
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3h: shortestPath finds a data-path chain when given dataSuccessors", () => {
     // Build dataSuccessors the same way the inlined viewer does and
     // run the pure shortestPath helper from VIEWER_PURE_JS over it.

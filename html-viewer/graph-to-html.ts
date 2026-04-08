@@ -355,6 +355,30 @@ export function graphJsonToHtml(graph: GraphJson): string {
     font-size: 10px; color: var(--muted);
     margin: 2px 0;
   }
+  /* Phase 3j: function/method data footprint section */
+  #info .data-footprint-summary {
+    font-size: 11px;
+    color: var(--muted);
+    margin: 2px 0 6px 0;
+  }
+  #info .data-footprint-reads { color: #7fc6c0; }
+  #info .data-footprint-writes { color: #ff8a65; }
+  #info .data-footprint-group {
+    margin-top: 4px;
+  }
+  #info .data-footprint-label {
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 2px 0;
+  }
+  #info .data-footprint-more {
+    font-size: 10px;
+    color: var(--muted);
+    margin: 2px 0 2px 12px;
+    font-style: italic;
+  }
   #info .open-link {
     display: inline-block;
     margin-top: 6px;
@@ -1286,6 +1310,74 @@ function showInfo(d) {
           escapeHtml(shortName(tr.target)) +
           '</span></div>' +
           '</div>';
+      }
+      html += '</div>';
+    }
+  }
+
+  // Phase 3j: function/method data footprint. When the focused node
+  // is an API (function/method), surface its reads_field/writes_field
+  // outgoing edges in a dedicated section so the user can see what
+  // data the API touches at a glance — instead of scanning the
+  // generic "Outgoing" section that mixes calls, contains, etc. and
+  // is capped at 6 entries total. This is the API ↔ data join the
+  // unified visualization story is built around.
+  if (d.kind === "function" || d.kind === "method") {
+    const reads = [];
+    const writes = [];
+    for (const link of links) {
+      const src = typeof link.source === "object" ? link.source.id : link.source;
+      if (src !== d.id) continue;
+      const dst = typeof link.target === "object" ? link.target.id : link.target;
+      if (link.kind === "reads_field") reads.push(dst);
+      else if (link.kind === "writes_field") writes.push(dst);
+    }
+    if (reads.length > 0 || writes.length > 0) {
+      html += '<div class="section"><div class="section-title">Data footprint</div>';
+      // Render the counts up front so the user has a one-glance summary
+      html +=
+        '<div class="data-footprint-summary">' +
+        '<span class="data-footprint-reads">reads: ' + reads.length + '</span>' +
+        ' &middot; ' +
+        '<span class="data-footprint-writes">writes: ' + writes.length + '</span>' +
+        '</div>';
+      // Render up to 6 reads + 6 writes as clickable rows
+      const cap = 6;
+      if (reads.length > 0) {
+        html += '<div class="data-footprint-group">';
+        html += '<div class="data-footprint-label">reads</div>';
+        for (const target of reads.slice(0, cap)) {
+          html +=
+            '<div class="neighbor-row" data-target="' +
+            escapeHtml(target) +
+            '">' +
+            '<span class="kind">R</span>' +
+            '<span class="name">' +
+            escapeHtml(shortName(target)) +
+            '</span></div>';
+        }
+        if (reads.length > cap) {
+          html += '<div class="data-footprint-more">+' + (reads.length - cap) + ' more</div>';
+        }
+        html += '</div>';
+      }
+      if (writes.length > 0) {
+        html += '<div class="data-footprint-group">';
+        html += '<div class="data-footprint-label">writes</div>';
+        for (const target of writes.slice(0, cap)) {
+          html +=
+            '<div class="neighbor-row" data-target="' +
+            escapeHtml(target) +
+            '">' +
+            '<span class="kind">W</span>' +
+            '<span class="name">' +
+            escapeHtml(shortName(target)) +
+            '</span></div>';
+        }
+        if (writes.length > cap) {
+          html += '<div class="data-footprint-more">+' + (writes.length - cap) + ' more</div>';
+        }
+        html += '</div>';
       }
       html += '</div>';
     }
