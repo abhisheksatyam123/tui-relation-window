@@ -600,6 +600,7 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <input id="path-from" type="search" placeholder="from (canonical name)" />
     <input id="path-to" type="search" placeholder="to (canonical name)" />
     <button class="preset" id="path-find">Find shortest path</button>
+    <button class="preset" id="path-find-data">Find data path</button>
     <div id="path-status"></div>
 
     <h2>Top imported modules</h2>
@@ -771,6 +772,19 @@ for (const l of links) {
   if (inBuckets) {
     if (!inBuckets[l.kind]) inBuckets[l.kind] = [];
     inBuckets[l.kind].push(l.source);
+  }
+}
+// Phase 3h: data-path-restricted successors. Only field_of_type and
+// aggregates edges count, mirroring the find_data_path SQL helper.
+// The "Find data path" button uses this map instead of the full
+// successors so the path search walks the structural graph (how
+// types reach types) rather than the union graph (anything reaches
+// anything via any edge kind).
+const dataSuccessors = new Map();
+for (const n of data.nodes) dataSuccessors.set(n.id, new Set());
+for (const l of links) {
+  if (l.kind === "field_of_type" || l.kind === "aggregates") {
+    dataSuccessors.get(l.source).add(l.target);
   }
 }
 // Walk direction for neighborhood expansion. Mirrors the server-side
@@ -1510,6 +1524,7 @@ document.getElementById("preset-reset").addEventListener("click", applyResetView
 
 // Path-finding wiring: button click + Enter-key in either input.
 document.getElementById("path-find").addEventListener("click", findAndShowPath);
+document.getElementById("path-find-data").addEventListener("click", findAndShowDataPath);
 for (const id of ["path-from", "path-to"]) {
   document.getElementById(id).addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") findAndShowPath();
@@ -1638,6 +1653,72 @@ function findAndShowPath() {
   }
   status.textContent =
     "path: " + trail.length + " nodes, " + (trail.length - 1) + " hops";
+  status.className = "ok";
+  render();
+}
+
+// Phase 3h: data-path search. Same UI as findAndShowPath but walks
+// the dataSuccessors map (field_of_type + aggregates only) so the
+// BFS resolves "how does Container structurally reach User" rather
+// than "is there any chain of any edge kind from A to B". Mirrors
+// the find_data_path query intent and the snapshot-stats
+// --data-path-from / --data-path-to CLI flags.
+function findAndShowDataPath() {
+  const fromQ = document.getElementById("path-from").value.trim();
+  const toQ = document.getElementById("path-to").value.trim();
+  const status = document.getElementById("path-status");
+  if (!fromQ || !toQ) {
+    status.textContent = "enter both endpoints";
+    status.className = "fail";
+    return;
+  }
+  const src = findSymbol(fromQ);
+  const dst = findSymbol(toQ);
+  if (!src || !dst) {
+    status.textContent =
+      (!src ? "no match for from" : "no match for to") + " — try a longer query";
+    status.className = "fail";
+    pathNodes.clear();
+    pathEdgeKeys.clear();
+    render();
+    return;
+  }
+  // Use the data-restricted successors so the BFS only walks
+  // field_of_type / aggregates edges. The pure helper is the same
+  // shortestPath() from VIEWER_PURE_JS — different adjacency map
+  // is the only thing that changes.
+  const trail = shortestPath(src, dst, dataSuccessors, nodeById);
+  if (!trail) {
+    status.textContent =
+      "no data path found (no field_of_type / aggregates chain)";
+    status.className = "fail";
+    pathNodes.clear();
+    pathEdgeKeys.clear();
+    render();
+    return;
+  }
+  pathNodes.clear();
+  pathEdgeKeys.clear();
+  for (const id of trail) pathNodes.add(id);
+  for (let i = 0; i < trail.length - 1; i++) {
+    const a = trail[i];
+    const b = trail[i + 1];
+    // Only encode field_of_type / aggregates edges between this
+    // pair — render() walks links and matches by (kind|src|dst).
+    for (const l of links) {
+      const ls = typeof l.source === "object" ? l.source.id : l.source;
+      const lt = typeof l.target === "object" ? l.target.id : l.target;
+      if (
+        ls === a &&
+        lt === b &&
+        (l.kind === "field_of_type" || l.kind === "aggregates")
+      ) {
+        pathEdgeKeys.add(l.kind + "|" + a + "|" + b);
+      }
+    }
+  }
+  status.textContent =
+    "data path: " + trail.length + " types, " + (trail.length - 1) + " hops";
   status.className = "ok";
   render();
 }

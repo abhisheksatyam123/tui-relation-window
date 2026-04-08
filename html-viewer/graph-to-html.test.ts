@@ -365,6 +365,89 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     expect(out.has("module:src/model.ts#User")).toBe(true) // via aggregates
   })
 
+  it("Phase 3h: surfaces the Find data path button + dataSuccessors map", () => {
+    // The find_data_path query intent has a viewer-side companion:
+    // a dataSuccessors map (field_of_type + aggregates only) and a
+    // dedicated button that runs shortestPath() over it. This test
+    // pins the names so a future refactor doesn't silently lose
+    // the wiring.
+    const html = graphJsonToHtml(fixture)
+    // The button must exist with the canonical id used by the
+    // click binding.
+    expect(html).toContain('id="path-find-data"')
+    // The dispatch function and adjacency map are inlined.
+    expect(html).toContain("function findAndShowDataPath")
+    expect(html).toContain("const dataSuccessors")
+    // The map is built only from the two data-path edge kinds.
+    expect(html).toContain('"field_of_type" || l.kind === "aggregates"')
+    // The button is wired to the click handler.
+    expect(html).toContain(
+      'document.getElementById("path-find-data").addEventListener',
+    )
+    // The status message is the data-path-specific one (so the
+    // user sees "data path: N types" instead of "path: N nodes")
+    expect(html).toContain('"data path: "')
+    // Inlined script must still parse on the richer fixture.
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
+  it("Phase 3h: shortestPath finds a data-path chain when given dataSuccessors", () => {
+    // Build dataSuccessors the same way the inlined viewer does and
+    // run the pure shortestPath helper from VIEWER_PURE_JS over it.
+    // This proves the algorithm + adjacency combination resolves
+    // a real chain in the fixture: Box → User via the aggregates
+    // edge (the only field_of_type/aggregates chain in the fixture
+    // since the field_of_type edges go from field nodes to their
+    // declared types).
+    const fixture4 = JSON.parse(fixtureJson) as GraphJson
+    const accessor = `
+      ${VIEWER_PURE_JS}
+      return { shortestPath };
+    `
+    const fns = new Function(accessor)() as {
+      shortestPath: (
+        srcId: string,
+        dstId: string,
+        succ: Map<string, Set<string>>,
+        nodeIds: Set<string>,
+      ) => string[] | null
+    }
+    const dataSucc = new Map<string, Set<string>>()
+    for (const n of fixture4.nodes) dataSucc.set(n.id, new Set())
+    for (const e of fixture4.edges) {
+      if (e.kind === "field_of_type" || e.kind === "aggregates") {
+        dataSucc.get(e.src)?.add(e.dst)
+      }
+    }
+    const ids = new Set(fixture4.nodes.map((n) => n.id))
+    // Box has an aggregates edge → User in the fixture
+    const trail = fns.shortestPath(
+      "module:src/model.ts#Box",
+      "module:src/model.ts#User",
+      dataSucc,
+      ids,
+    )
+    expect(trail).not.toBeNull()
+    expect(trail).toEqual([
+      "module:src/model.ts#Box",
+      "module:src/model.ts#User",
+    ])
+    // No path the other way — field_of_type/aggregates is directional
+    const reverse = fns.shortestPath(
+      "module:src/model.ts#User",
+      "module:src/model.ts#Box",
+      dataSucc,
+      ids,
+    )
+    expect(reverse).toBeNull()
+  })
+
   it("renders within the size budget for a real-shaped data-structure graph", () => {
     const html = graphJsonToHtml(fixture)
     // 13 nodes + 17 edges with metadata. Reasonable budget: 700KB
