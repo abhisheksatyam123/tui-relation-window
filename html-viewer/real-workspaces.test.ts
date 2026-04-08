@@ -8,7 +8,7 @@
  *
  * Targets (skipped cleanly when missing):
  *   - /home/abhi/qprojects/opencode/packages/opencode (TS, ~700 files)
- *   - /home/abhi/qprojects/qcode     (TS, ~1900 files)
+ *   - /home/abhi/qprojects/openclaude     (TS, ~1900 files)
  *   - /home/abhi/qprojects/markdown-oxide             (Rust, ~67 files)
  *
  * The intelgraph CLI is also gated — if /home/abhi/qprojects/clangd-mcp
@@ -56,8 +56,8 @@ const CASES: WorkspaceCase[] = [
     maxNodes: 200,
   },
   {
-    name: "qcode",
-    path: "/home/abhi/qprojects/qcode",
+    name: "openclaude",
+    path: "/home/abhi/qprojects/openclaude",
     expectedSubstring: "src/",
     maxNodes: 200,
   },
