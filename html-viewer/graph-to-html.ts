@@ -280,6 +280,12 @@ export function graphJsonToHtml(graph: GraphJson): string {
   }
   #sidebar .stat { display: flex; justify-content: space-between; padding: 2px 0; font-variant-numeric: tabular-nums; }
   #sidebar .stat .label { color: var(--muted); }
+  /* Phase 3r: health badge — clickable rows when count > 0 */
+  #sidebar .health-row { padding: 3px 4px; border-radius: 2px; }
+  #sidebar .health-row.has-issues { cursor: pointer; }
+  #sidebar .health-row.has-issues:hover { background: var(--panel); }
+  #sidebar .health-row.has-issues span:last-child { color: #ff8a65; font-weight: 600; }
+  #sidebar .health-row.clean span:last-child { color: #7fc6c0; }
   #sidebar input[type="search"] {
     width: 100%; box-sizing: border-box;
     background: var(--bg); color: var(--text);
@@ -585,6 +591,20 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <div class="stat"><span class="label">nodes</span><span id="stat-nodes">0</span></div>
     <div class="stat"><span class="label">edges</span><span id="stat-edges">0</span></div>
     <div class="stat"><span class="label">visible</span><span id="stat-visible">0</span></div>
+
+    <h2>Health</h2>
+    <div class="stat health-row" id="health-call-cycles-row" data-health="call-cycles">
+      <span class="label">call cycles</span><span id="health-call-cycles">0</span>
+    </div>
+    <div class="stat health-row" id="health-struct-cycles-row" data-health="struct-cycles">
+      <span class="label">struct cycles</span><span id="health-struct-cycles">0</span>
+    </div>
+    <div class="stat health-row" id="health-unused-fields-row" data-health="unused-fields">
+      <span class="label">unused fields</span><span id="health-unused-fields">0</span>
+    </div>
+    <div class="stat health-row" id="health-orphan-types-row" data-health="orphan-types">
+      <span class="label">untouched types</span><span id="health-orphan-types">0</span>
+    </div>
 
     <h2>Search</h2>
     <input id="search" type="search" placeholder="canonical name…" />
@@ -1770,6 +1790,179 @@ function buildUnusedFieldsPanel(containerId) {
   }
 }
 
+// Phase 3r: health badge. Computes aggregate red-flag counts inline
+// from the loaded graph and renders them as a sticky stats block at
+// the top of the sidebar. Lets the user open a fresh workspace and
+// immediately see if it has any of the red-flag patterns the
+// individual MCP queries detect.
+//
+// Computes:
+//   - call_cycles:    pairs of methods that mutually call each other
+//                     (mirrors find_call_cycles)
+//   - struct_cycles:  pairs of types that mutually contain each
+//                     other via aggregates (mirrors find_struct_cycles)
+//   - unused_fields:  field nodes with no incoming reads_field /
+//                     writes_field (mirrors find_unused_fields)
+//   - orphan_types:   class/struct/interface nodes whose contained
+//                     fields receive zero touches AND nothing
+//                     references_type the type itself (a softer
+//                     "untouched type" signal)
+//
+// Each row has a clickable jump-to-first-instance handler when the
+// count is > 0. Rows with count = 0 render in green to give a clean
+// codebase a positive signal.
+function buildHealthBadge() {
+  // Step 1: call cycles. Find any (a, b) where a calls b and b
+  // calls a; emit one row per pair (canonical_name < other).
+  const callPairs = new Set();
+  const callCycleNodes = [];
+  {
+    const callsBetween = new Set();
+    for (const l of links) {
+      if (l.kind !== "calls") continue;
+      const s = typeof l.source === "object" ? l.source.id : l.source;
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      callsBetween.add(s + "->" + t);
+    }
+    for (const l of links) {
+      if (l.kind !== "calls") continue;
+      const s = typeof l.source === "object" ? l.source.id : l.source;
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      if (s >= t) continue; // canonical ordering, skip dupes
+      if (callsBetween.has(t + "->" + s)) {
+        const key = s + "|" + t;
+        if (!callPairs.has(key)) {
+          callPairs.add(key);
+          const sNode = nodeById.get(s);
+          const tNode = nodeById.get(t);
+          if (sNode && tNode) {
+            const sIsApi = sNode.kind === "function" || sNode.kind === "method";
+            const tIsApi = tNode.kind === "function" || tNode.kind === "method";
+            if (sIsApi && tIsApi) callCycleNodes.push(s);
+          }
+        }
+      }
+    }
+  }
+
+  // Step 2: struct cycles via aggregates edges
+  const structPairs = new Set();
+  const structCycleNodes = [];
+  {
+    const aggBetween = new Set();
+    for (const l of links) {
+      if (l.kind !== "aggregates") continue;
+      const s = typeof l.source === "object" ? l.source.id : l.source;
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      aggBetween.add(s + "->" + t);
+    }
+    for (const l of links) {
+      if (l.kind !== "aggregates") continue;
+      const s = typeof l.source === "object" ? l.source.id : l.source;
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      if (s >= t) continue;
+      if (aggBetween.has(t + "->" + s)) {
+        const key = s + "|" + t;
+        if (!structPairs.has(key)) {
+          structPairs.add(key);
+          const sNode = nodeById.get(s);
+          const tNode = nodeById.get(t);
+          if (sNode && tNode) {
+            const isType = (k) => k === "struct" || k === "class" || k === "interface";
+            if (isType(sNode.kind) && isType(tNode.kind)) {
+              structCycleNodes.push(s);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Step 3: unused fields (reuses Phase 3p-frontend's logic inline)
+  const touchedFields = new Set();
+  for (const l of links) {
+    if (l.kind !== "reads_field" && l.kind !== "writes_field") continue;
+    const dst = typeof l.target === "object" ? l.target.id : l.target;
+    touchedFields.add(dst);
+  }
+  const unusedFieldNodes = [];
+  for (const n of data.nodes) {
+    if (n.kind === "field" && !touchedFields.has(n.id)) {
+      unusedFieldNodes.push(n.id);
+    }
+  }
+
+  // Step 4: orphan types — class/struct/interface with NO incoming
+  // references_type, NO field with any toucher, and NO incoming
+  // aggregates. Picks types that appear "marooned" in the graph.
+  const refTargets = new Set();
+  for (const l of links) {
+    if (l.kind === "references_type" || l.kind === "aggregates") {
+      const t = typeof l.target === "object" ? l.target.id : l.target;
+      refTargets.add(t);
+    }
+  }
+  // Build parent → fields map (one walk through links)
+  const parentFields = new Map();
+  for (const l of links) {
+    if (l.kind !== "contains") continue;
+    const s = typeof l.source === "object" ? l.source.id : l.source;
+    const t = typeof l.target === "object" ? l.target.id : l.target;
+    const tNode = nodeById.get(t);
+    if (!tNode || tNode.kind !== "field") continue;
+    let set = parentFields.get(s);
+    if (!set) {
+      set = new Set();
+      parentFields.set(s, set);
+    }
+    set.add(t);
+  }
+  const orphanTypeNodes = [];
+  for (const n of data.nodes) {
+    if (n.kind !== "class" && n.kind !== "struct" && n.kind !== "interface") continue;
+    if (refTargets.has(n.id)) continue;
+    const fields = parentFields.get(n.id);
+    if (fields) {
+      let anyTouched = false;
+      for (const f of fields) {
+        if (touchedFields.has(f)) { anyTouched = true; break; }
+      }
+      if (anyTouched) continue;
+    }
+    orphanTypeNodes.push(n.id);
+  }
+
+  // Render each row, wiring a click handler that focuses the first
+  // instance when the count is > 0.
+  const renderRow = (rowId, valueId, nodes) => {
+    const row = document.getElementById(rowId);
+    const valueEl = document.getElementById(valueId);
+    if (!row || !valueEl) return;
+    valueEl.textContent = String(nodes.length);
+    if (nodes.length > 0) {
+      row.classList.add("has-issues");
+      row.classList.remove("clean");
+      row.onclick = () => {
+        const firstId = nodes[0];
+        if (nodeById.has(firstId)) {
+          focused = firstId;
+          applyFocus();
+          showInfo(nodeById.get(firstId));
+          saveHashState();
+        }
+      };
+    } else {
+      row.classList.add("clean");
+      row.classList.remove("has-issues");
+      row.onclick = null;
+    }
+  };
+  renderRow("health-call-cycles-row", "health-call-cycles", callCycleNodes);
+  renderRow("health-struct-cycles-row", "health-struct-cycles", structCycleNodes);
+  renderRow("health-unused-fields-row", "health-unused-fields", unusedFieldNodes);
+  renderRow("health-orphan-types-row", "health-orphan-types", orphanTypeNodes);
+}
+
 // Phase 3o-frontend: viewer-side companion to find_top_field_writers
 // and find_top_field_readers. Counts DISTINCT field targets per
 // source method via the supplied edge_kind. Symmetric to the
@@ -2246,6 +2439,7 @@ buildTopTouchedTypesPanel("top-touched");
 buildTopFieldAccessorsPanel("top-mutators", "writes_field");
 buildTopFieldAccessorsPanel("top-readers", "reads_field");
 buildUnusedFieldsPanel("unused-fields");
+buildHealthBadge();
 
 // Search: as the user types, highlight EVERY matching node (not
 // just the first) and show a count. The first match is also

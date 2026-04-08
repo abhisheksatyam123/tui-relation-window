@@ -428,6 +428,39 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3r: Health badge sidebar panel is wired in", () => {
+    // The health badge is a sticky stats block at the top of the
+    // sidebar showing aggregate red-flag counts: call cycles,
+    // struct cycles, unused fields, untouched types. Each row is
+    // clickable and jumps focus to the first instance when count > 0.
+    const html = graphJsonToHtml(fixture)
+    // The DOM markers for the four health rows
+    expect(html).toContain('<h2>Health</h2>')
+    expect(html).toContain('id="health-call-cycles-row"')
+    expect(html).toContain('id="health-struct-cycles-row"')
+    expect(html).toContain('id="health-unused-fields-row"')
+    expect(html).toContain('id="health-orphan-types-row"')
+    // The function that fills them in
+    expect(html).toContain("function buildHealthBadge")
+    expect(html).toContain("buildHealthBadge()")
+    // The four sub-walks
+    expect(html).toContain("callCycleNodes")
+    expect(html).toContain("structCycleNodes")
+    expect(html).toContain("unusedFieldNodes")
+    expect(html).toContain("orphanTypeNodes")
+    // The has-issues / clean state classes
+    expect(html).toContain('"has-issues"')
+    expect(html).toContain('"clean"')
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3q: Find call path button is wired in (calls-only adjacency)", () => {
     // The strict-call variant of the find_path button. Mirrors
     // Find data path's design — same UI fields, different adjacency
