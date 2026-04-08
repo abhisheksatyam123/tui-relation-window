@@ -638,6 +638,9 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <h2>Top called functions</h2>
     <div id="top-called"></div>
 
+    <h2>Top touched types</h2>
+    <div id="top-touched"></div>
+
     <h2>Symbol kinds</h2>
     <div id="kind-legend"></div>
 
@@ -1684,6 +1687,83 @@ function buildHubPanel(containerId, edgeKind, validNodeKinds) {
   }
 }
 
+// Phase 3m-frontend: viewer-side companion to find_top_touched_types.
+// Two-hop walk: for each (class/struct/interface, field) pair via
+// contains, count DISTINCT sources of reads_field/writes_field
+// landing on any of that parent's fields. Each touching API counts
+// once per parent. The result is the data-side analog of the
+// "Top called functions" hub list — surfaces "the central pieces
+// of state" that the codebase actually revolves around.
+function buildTopTouchedTypesPanel(containerId) {
+  // Step 1: build a parent → set of field ids map via contains edges
+  const parentToFields = new Map();
+  for (const l of links) {
+    if (l.kind !== "contains") continue;
+    const parent = nodeById.get(l.source);
+    const child = nodeById.get(l.target);
+    if (!parent || !child) continue;
+    if (parent.kind !== "class" && parent.kind !== "struct" && parent.kind !== "interface") continue;
+    if (child.kind !== "field") continue;
+    let set = parentToFields.get(l.source);
+    if (!set) {
+      set = new Set();
+      parentToFields.set(l.source, set);
+    }
+    set.add(l.target);
+  }
+
+  // Step 2: walk reads_field/writes_field edges, group touchers by parent
+  // (the source of the access edge is the touching API; the target's
+  // owning class is the parent we're counting toward).
+  const fieldToParent = new Map();
+  for (const [parent, fields] of parentToFields) {
+    for (const f of fields) fieldToParent.set(f, parent);
+  }
+  const parentTouchers = new Map();
+  for (const l of links) {
+    if (l.kind !== "reads_field" && l.kind !== "writes_field") continue;
+    const parent = fieldToParent.get(l.target);
+    if (!parent) continue;
+    let set = parentTouchers.get(parent);
+    if (!set) {
+      set = new Set();
+      parentTouchers.set(parent, set);
+    }
+    set.add(l.source);
+  }
+
+  // Step 3: rank by toucher count desc and render the top 8
+  const ranked = [];
+  for (const [id, touchers] of parentTouchers) {
+    const node = nodeById.get(id);
+    if (!node) continue;
+    ranked.push({ id, count: touchers.size, node });
+  }
+  ranked.sort((a, b) => b.count - a.count);
+  const top = ranked.slice(0, 8);
+  const container = document.getElementById(containerId);
+  container.innerHTML = "";
+  if (top.length === 0) {
+    container.innerHTML = '<div class="hub-row" style="cursor:default"><div class="name" style="color:var(--muted);font-style:italic">none</div></div>';
+    return;
+  }
+  for (const hub of top) {
+    const row = document.createElement("div");
+    row.className = "hub-row";
+    row.title = hub.id;
+    row.innerHTML =
+      '<div class="deg">' + hub.count + '</div>' +
+      '<div class="name">' + escapeHtml(shortName(hub.id)) + '</div>';
+    row.onclick = () => {
+      focused = hub.id;
+      applyFocus();
+      showInfo(hub.node);
+      saveHashState();
+    };
+    container.appendChild(row);
+  }
+}
+
 // ── Quick-view presets ──────────────────────────────────────────────────────
 // One-click filter combinations for the most useful subgraphs.
 function applyModuleDepView() {
@@ -1963,6 +2043,7 @@ buildKindLegend();
 buildEdgeLegend();
 buildHubPanel("top-imported", "imports", new Set(["module"]));
 buildHubPanel("top-called", "calls", new Set(["function", "method"]));
+buildTopTouchedTypesPanel("top-touched");
 
 // Search: as the user types, highlight EVERY matching node (not
 // just the first) and show a count. The first match is also

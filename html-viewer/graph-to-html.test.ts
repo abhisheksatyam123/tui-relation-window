@@ -428,6 +428,28 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3m-frontend: Top touched types panel is wired in", () => {
+    // The data-side analog of the Top called functions hub panel.
+    // Pin the markers so a future refactor doesn't lose the panel.
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain('<h2>Top touched types</h2>')
+    expect(html).toContain('id="top-touched"')
+    expect(html).toContain("function buildTopTouchedTypesPanel")
+    expect(html).toContain('buildTopTouchedTypesPanel("top-touched")')
+    // The two-hop walk uses contains then reads_field/writes_field
+    expect(html).toContain("parentToFields")
+    expect(html).toContain("fieldToParent")
+    expect(html).toContain("parentTouchers")
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3l-frontend: transitive data footprint walker is wired in", () => {
     // The Phase 3j data footprint section now also walks calls
     // edges from the focused method up to a bounded depth and
