@@ -668,6 +668,9 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <h2>Top readers</h2>
     <div id="top-readers"></div>
 
+    <h2>Top hot fields</h2>
+    <div id="top-hot-fields"></div>
+
     <h2>Unused fields</h2>
     <div id="unused-fields"></div>
 
@@ -1790,6 +1793,71 @@ function buildUnusedFieldsPanel(containerId) {
   }
 }
 
+// Phase 3t-frontend: viewer-side companion to find_top_hot_fields.
+// Field-level granularity sibling of buildTopTouchedTypesPanel.
+// Counts distinct method touchers per individual field via
+// reads_field/writes_field edges and renders the top 8. Each row
+// shows the toucher count plus a R/W breakdown so the user can
+// tell read-mostly hot spots apart from write-heavy ones.
+function buildTopHotFieldsPanel(containerId) {
+  // Build field → Set<touching method id> AND r/w counts
+  const fieldTouchers = new Map();
+  const fieldReadCounts = new Map();
+  const fieldWriteCounts = new Map();
+  for (const l of links) {
+    if (l.kind !== "reads_field" && l.kind !== "writes_field") continue;
+    const dst = typeof l.target === "object" ? l.target.id : l.target;
+    const src = typeof l.source === "object" ? l.source.id : l.source;
+    let set = fieldTouchers.get(dst);
+    if (!set) {
+      set = new Set();
+      fieldTouchers.set(dst, set);
+    }
+    set.add(src);
+    if (l.kind === "reads_field") {
+      fieldReadCounts.set(dst, (fieldReadCounts.get(dst) || 0) + 1);
+    } else {
+      fieldWriteCounts.set(dst, (fieldWriteCounts.get(dst) || 0) + 1);
+    }
+  }
+  const ranked = [];
+  for (const [id, touchers] of fieldTouchers) {
+    const node = nodeById.get(id);
+    if (!node) continue;
+    if (node.kind !== "field") continue;
+    ranked.push({
+      id,
+      count: touchers.size,
+      reads: fieldReadCounts.get(id) || 0,
+      writes: fieldWriteCounts.get(id) || 0,
+      node,
+    });
+  }
+  ranked.sort((a, b) => b.count - a.count);
+  const top = ranked.slice(0, 8);
+  const container = document.getElementById(containerId);
+  container.innerHTML = "";
+  if (top.length === 0) {
+    container.innerHTML = '<div class="hub-row" style="cursor:default"><div class="name" style="color:var(--muted);font-style:italic">none</div></div>';
+    return;
+  }
+  for (const hub of top) {
+    const row = document.createElement("div");
+    row.className = "hub-row";
+    row.title = hub.id + " — " + hub.reads + " reads, " + hub.writes + " writes";
+    row.innerHTML =
+      '<div class="deg">' + hub.count + '</div>' +
+      '<div class="name">' + escapeHtml(shortName(hub.id)) + '</div>';
+    row.onclick = () => {
+      focused = hub.id;
+      applyFocus();
+      showInfo(hub.node);
+      saveHashState();
+    };
+    container.appendChild(row);
+  }
+}
+
 // Phase 3r: health badge. Computes aggregate red-flag counts inline
 // from the loaded graph and renders them as a sticky stats block at
 // the top of the sidebar. Lets the user open a fresh workspace and
@@ -2438,6 +2506,7 @@ buildHubPanel("top-called", "calls", new Set(["function", "method"]));
 buildTopTouchedTypesPanel("top-touched");
 buildTopFieldAccessorsPanel("top-mutators", "writes_field");
 buildTopFieldAccessorsPanel("top-readers", "reads_field");
+buildTopHotFieldsPanel("top-hot-fields");
 buildUnusedFieldsPanel("unused-fields");
 buildHealthBadge();
 

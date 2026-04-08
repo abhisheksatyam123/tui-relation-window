@@ -428,6 +428,33 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3t-frontend: Top hot fields hub panel is wired in", () => {
+    // Field-level granularity sibling of the Top touched types
+    // panel. Tracks the per-field toucher counts and the R/W
+    // breakdown so the user can spot read-mostly hot spots vs
+    // write-heavy ones.
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain('<h2>Top hot fields</h2>')
+    expect(html).toContain('id="top-hot-fields"')
+    expect(html).toContain("function buildTopHotFieldsPanel")
+    expect(html).toContain('buildTopHotFieldsPanel("top-hot-fields")')
+    // The walker tracks per-field touchers AND per-kind counts
+    expect(html).toContain("fieldTouchers")
+    expect(html).toContain("fieldReadCounts")
+    expect(html).toContain("fieldWriteCounts")
+    // Title attribute carries the R/W breakdown for hover
+    expect(html).toContain('" reads, "')
+    expect(html).toContain('" writes"')
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3r: Health badge sidebar panel is wired in", () => {
     // The health badge is a sticky stats block at the top of the
     // sidebar showing aggregate red-flag counts: call cycles,
