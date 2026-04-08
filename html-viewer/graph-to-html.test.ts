@@ -227,6 +227,12 @@ describe("graphJsonToHtml — structural assertions", () => {
     expect(html).toContain("function applyDataStructureView")
     // Help overlay mentions the new preset
     expect(html).toContain("Data structure view")
+
+    // "Data flow view" preset (new): method/function/field nodes
+    // connected by reads_field/writes_field
+    expect(html).toContain('id="preset-flow"')
+    expect(html).toContain("function applyDataFlowView")
+    expect(html).toContain("Data flow")
   })
 })
 

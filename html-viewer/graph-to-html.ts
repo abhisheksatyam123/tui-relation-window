@@ -577,6 +577,7 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <h2>Quick views</h2>
     <button class="preset" id="preset-modules">Module dependency view</button>
     <button class="preset" id="preset-data">Data structure view</button>
+    <button class="preset" id="preset-flow">Data flow view</button>
     <button class="preset" id="preset-reset">Reset all filters</button>
 
     <h2>Find path</h2>
@@ -632,7 +633,7 @@ export function graphJsonToHtml(graph: GraphJson): string {
 
         <h3>Sidebar — paths</h3>
         <div class="item"><kbd>find</kbd><div class="desc">"Find path" runs directed BFS between two symbols, highlights the trail</div></div>
-        <div class="item"><kbd>presets</kbd><div class="desc">"Module dependency view" → module-only + imports-only. "Data structure view" → struct/class/interface/enum + field/variant nodes connected by contains/field_of_type/aggregates.</div></div>
+        <div class="item"><kbd>presets</kbd><div class="desc">Three quick views: "Module dependency" (module + imports), "Data structure" (struct/class/enum + field/variant via contains/field_of_type/aggregates), "Data flow" (method/function/field via reads_field/writes_field).</div></div>
 
         <h3>Persistence</h3>
         <div class="item"><kbd>url</kbd><div class="desc">focus, depth, direction, toggles, and filters all live in the URL hash — share or bookmark to round-trip the view</div></div>
@@ -1422,8 +1423,27 @@ function applyDataStructureView() {
   render();
   saveHashState();
 }
+function applyDataFlowView() {
+  // Show methods + functions + fields, connected by reads_field +
+  // writes_field. Answers "what data does each API touch and how"
+  // visually — the dual of "Data structure view" which shows the
+  // type relationships rather than the access patterns.
+  activeKinds.clear();
+  for (const k of ["method", "function", "field"]) {
+    activeKinds.add(k);
+  }
+  activeEdgeKinds.clear();
+  for (const k of ["reads_field", "writes_field", "contains"]) {
+    activeEdgeKinds.add(k);
+  }
+  buildKindLegend();
+  buildEdgeLegend();
+  render();
+  saveHashState();
+}
 document.getElementById("preset-modules").addEventListener("click", applyModuleDepView);
 document.getElementById("preset-data").addEventListener("click", applyDataStructureView);
+document.getElementById("preset-flow").addEventListener("click", applyDataFlowView);
 document.getElementById("preset-reset").addEventListener("click", applyResetView);
 
 // Path-finding wiring: button click + Enter-key in either input.
