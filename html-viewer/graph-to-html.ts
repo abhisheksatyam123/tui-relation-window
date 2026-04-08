@@ -647,6 +647,9 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <h2>Top readers</h2>
     <div id="top-readers"></div>
 
+    <h2>Unused fields</h2>
+    <div id="unused-fields"></div>
+
     <h2>Symbol kinds</h2>
     <div id="kind-legend"></div>
 
@@ -1693,6 +1696,66 @@ function buildHubPanel(containerId, edgeKind, validNodeKinds) {
   }
 }
 
+// Phase 3p-frontend: viewer-side companion to find_unused_fields.
+// Walks every field node in the inlined data and looks for any
+// incoming reads_field / writes_field edge. The fields with NO
+// such incoming edges are dead state — refactor candidates the
+// user should see at a glance. Pure inline computation; no
+// backend round-trip.
+function buildUnusedFieldsPanel(containerId) {
+  // Collect every field id with at least one incoming touch
+  const touched = new Set();
+  for (const l of links) {
+    if (l.kind !== "reads_field" && l.kind !== "writes_field") continue;
+    const dst = typeof l.target === "object" ? l.target.id : l.target;
+    touched.add(dst);
+  }
+  // Now find every field node not in the touched set
+  const unused = [];
+  for (const n of data.nodes) {
+    if (n.kind !== "field") continue;
+    if (touched.has(n.id)) continue;
+    unused.push(n);
+  }
+  // Sort by id for deterministic ordering
+  unused.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const top = unused.slice(0, 8);
+  const container = document.getElementById(containerId);
+  container.innerHTML = "";
+  if (top.length === 0) {
+    container.innerHTML = '<div class="hub-row" style="cursor:default"><div class="name" style="color:var(--muted);font-style:italic">none</div></div>';
+    return;
+  }
+  for (const node of top) {
+    const row = document.createElement("div");
+    row.className = "hub-row";
+    row.title = node.id;
+    // The deg column shows the dead-state count (0) explicitly so
+    // the user can tell at a glance these have no touchers, not
+    // that the count is missing. Total dead count is in the title.
+    row.innerHTML =
+      '<div class="deg">0</div>' +
+      '<div class="name">' + escapeHtml(shortName(node.id)) + '</div>';
+    row.onclick = () => {
+      focused = node.id;
+      applyFocus();
+      showInfo(node);
+      saveHashState();
+    };
+    container.appendChild(row);
+  }
+  // If there are more than the cap, append a "+N more" indicator
+  if (unused.length > top.length) {
+    const more = document.createElement("div");
+    more.className = "hub-row";
+    more.style.cursor = "default";
+    more.innerHTML =
+      '<div class="name" style="color:var(--muted);font-style:italic">+' +
+      (unused.length - top.length) + ' more</div>';
+    container.appendChild(more);
+  }
+}
+
 // Phase 3o-frontend: viewer-side companion to find_top_field_writers
 // and find_top_field_readers. Counts DISTINCT field targets per
 // source method via the supplied edge_kind. Symmetric to the
@@ -2106,6 +2169,7 @@ buildHubPanel("top-called", "calls", new Set(["function", "method"]));
 buildTopTouchedTypesPanel("top-touched");
 buildTopFieldAccessorsPanel("top-mutators", "writes_field");
 buildTopFieldAccessorsPanel("top-readers", "reads_field");
+buildUnusedFieldsPanel("unused-fields");
 
 // Search: as the user types, highlight EVERY matching node (not
 // just the first) and show a count. The first match is also

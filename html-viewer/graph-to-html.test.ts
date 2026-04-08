@@ -428,6 +428,28 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3p-frontend: Unused fields panel is wired in", () => {
+    // Pure inline computation walking links to find field nodes
+    // with no incoming reads_field/writes_field. Pin the markers
+    // so a future refactor doesn't lose the wiring.
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain('<h2>Unused fields</h2>')
+    expect(html).toContain('id="unused-fields"')
+    expect(html).toContain("function buildUnusedFieldsPanel")
+    expect(html).toContain('buildUnusedFieldsPanel("unused-fields")')
+    // The walker checks both edge kinds
+    expect(html).toContain('"reads_field" && l.kind !== "writes_field"')
+    // Inlined script must still parse — guards against the
+    // backtick-in-comment issue we hit on the first pass
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3o-frontend: Top mutators / Top readers hub panels are wired in", () => {
     // Symmetric to Top touched types but from the API side. Pin
     // the markers + the parameterized helper so a future refactor
