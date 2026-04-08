@@ -671,6 +671,9 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <h2>Top hot fields</h2>
     <div id="top-hot-fields"></div>
 
+    <h2>Data clumps</h2>
+    <div id="data-clumps"></div>
+
     <h2>Unused fields</h2>
     <div id="unused-fields"></div>
 
@@ -1858,6 +1861,104 @@ function buildTopHotFieldsPanel(containerId) {
   }
 }
 
+// Phase 3v-frontend: data clumps panel. Pure-inline data-clump
+// detector — finds field pairs that are touched together by the
+// same method, ranked by co-occurrence count. Surfaces refactor
+// candidates for sub-object extraction.
+//
+// Algorithm:
+//   1. Build src → Set<field id> map of every method's touched
+//      fields (reads_field/writes_field union)
+//   2. For every method that touches >= 2 fields, generate every
+//      pair (a, b) with a < b
+//   3. For each pair, count distinct methods that hit it
+//   4. Restrict to pairs whose fields share the same parent class
+//      via contains edges (cross-class pairs aren't clumps —
+//      that's just a method bridging two types)
+//   5. Render top 8 pairs ranked by co_occurrence
+function buildDataClumpsPanel(containerId) {
+  // Step 1: build src method → set of touched field ids
+  const methodFields = new Map();
+  for (const l of links) {
+    if (l.kind !== "reads_field" && l.kind !== "writes_field") continue;
+    const src = typeof l.source === "object" ? l.source.id : l.source;
+    const dst = typeof l.target === "object" ? l.target.id : l.target;
+    let set = methodFields.get(src);
+    if (!set) {
+      set = new Set();
+      methodFields.set(src, set);
+    }
+    set.add(dst);
+  }
+  // Step 2: build field → parent class via contains edges
+  const fieldToParent = new Map();
+  for (const l of links) {
+    if (l.kind !== "contains") continue;
+    const src = typeof l.source === "object" ? l.source.id : l.source;
+    const dst = typeof l.target === "object" ? l.target.id : l.target;
+    const dstNode = nodeById.get(dst);
+    if (dstNode && dstNode.kind === "field") {
+      fieldToParent.set(dst, src);
+    }
+  }
+  // Step 3: count co-occurrences per pair (same parent only)
+  const pairCounts = new Map();
+  for (const fields of methodFields.values()) {
+    if (fields.size < 2) continue;
+    const arr = Array.from(fields).sort();
+    for (let i = 0; i < arr.length; i++) {
+      const a = arr[i];
+      const pa = fieldToParent.get(a);
+      if (!pa) continue;
+      for (let j = i + 1; j < arr.length; j++) {
+        const b = arr[j];
+        const pb = fieldToParent.get(b);
+        if (pb !== pa) continue;
+        const key = a + "|" + b;
+        pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+      }
+    }
+  }
+  // Step 4: rank
+  const ranked = [];
+  for (const [key, count] of pairCounts) {
+    if (count < 2) continue; // only show actual clumps
+    const sep = key.indexOf("|");
+    const a = key.substring(0, sep);
+    const b = key.substring(sep + 1);
+    ranked.push({ a, b, count });
+  }
+  ranked.sort((x, y) => y.count - x.count);
+  const top = ranked.slice(0, 8);
+  const container = document.getElementById(containerId);
+  container.innerHTML = "";
+  if (top.length === 0) {
+    container.innerHTML = '<div class="hub-row" style="cursor:default"><div class="name" style="color:var(--muted);font-style:italic">none</div></div>';
+    return;
+  }
+  for (const clump of top) {
+    const row = document.createElement("div");
+    row.className = "hub-row";
+    row.title = clump.a + " ↔ " + clump.b;
+    // Render the pair as "a ↔ b" with shortName collapse
+    row.innerHTML =
+      '<div class="deg">' + clump.count + '</div>' +
+      '<div class="name">' +
+      escapeHtml(shortName(clump.a)) + ' ↔ ' + escapeHtml(shortName(clump.b)) +
+      '</div>';
+    row.onclick = () => {
+      // Click jumps focus to the first field of the pair
+      if (nodeById.has(clump.a)) {
+        focused = clump.a;
+        applyFocus();
+        showInfo(nodeById.get(clump.a));
+        saveHashState();
+      }
+    };
+    container.appendChild(row);
+  }
+}
+
 // Phase 3r: health badge. Computes aggregate red-flag counts inline
 // from the loaded graph and renders them as a sticky stats block at
 // the top of the sidebar. Lets the user open a fresh workspace and
@@ -2507,6 +2608,7 @@ buildTopTouchedTypesPanel("top-touched");
 buildTopFieldAccessorsPanel("top-mutators", "writes_field");
 buildTopFieldAccessorsPanel("top-readers", "reads_field");
 buildTopHotFieldsPanel("top-hot-fields");
+buildDataClumpsPanel("data-clumps");
 buildUnusedFieldsPanel("unused-fields");
 buildHealthBadge();
 

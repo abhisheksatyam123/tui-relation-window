@@ -428,6 +428,32 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3v-frontend: Data clumps panel is wired in", () => {
+    // Pure inline data-clump detector — finds field pairs touched
+    // by the same method, ranked by co-occurrence count. Pin the
+    // markers + the parent-class restriction so a future refactor
+    // doesn't lose the wiring.
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain('<h2>Data clumps</h2>')
+    expect(html).toContain('id="data-clumps"')
+    expect(html).toContain("function buildDataClumpsPanel")
+    expect(html).toContain('buildDataClumpsPanel("data-clumps")')
+    // The walker uses methodFields → fieldToParent → pairCounts
+    expect(html).toContain("methodFields")
+    expect(html).toContain("fieldToParent")
+    expect(html).toContain("pairCounts")
+    // The same-parent restriction (pb !== pa skips cross-class)
+    expect(html).toContain("pb !== pa")
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3t-frontend: Top hot fields hub panel is wired in", () => {
     // Field-level granularity sibling of the Top touched types
     // panel. Tracks the per-field toucher counts and the R/W
