@@ -629,6 +629,7 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <input id="path-from" type="search" placeholder="from (canonical name)" />
     <input id="path-to" type="search" placeholder="to (canonical name)" />
     <button class="preset" id="path-find">Find shortest path</button>
+    <button class="preset" id="path-find-call">Find call path</button>
     <button class="preset" id="path-find-data">Find data path</button>
     <div id="path-status"></div>
 
@@ -826,6 +827,19 @@ for (const n of data.nodes) dataSuccessors.set(n.id, new Set());
 for (const l of links) {
   if (l.kind === "field_of_type" || l.kind === "aggregates") {
     dataSuccessors.get(l.source).add(l.target);
+  }
+}
+// Phase 3q: calls-only successors. Sister adjacency map for the
+// "Find call path" button. The default Find shortest path uses
+// the full union adjacency, which is permissive but can return
+// "paths" that hop through imports / contains / references_type —
+// not what the user usually means when they say "show me how A
+// calls B". This restricted map gives them the strict answer.
+const callSuccessors = new Map();
+for (const n of data.nodes) callSuccessors.set(n.id, new Set());
+for (const l of links) {
+  if (l.kind === "calls") {
+    callSuccessors.get(l.source).add(l.target);
   }
 }
 // Walk direction for neighborhood expansion. Mirrors the server-side
@@ -1958,6 +1972,7 @@ document.getElementById("preset-reset").addEventListener("click", applyResetView
 
 // Path-finding wiring: button click + Enter-key in either input.
 document.getElementById("path-find").addEventListener("click", findAndShowPath);
+document.getElementById("path-find-call").addEventListener("click", findAndShowCallPath);
 document.getElementById("path-find-data").addEventListener("click", findAndShowDataPath);
 for (const id of ["path-from", "path-to"]) {
   document.getElementById(id).addEventListener("keydown", (ev) => {
@@ -2087,6 +2102,67 @@ function findAndShowPath() {
   }
   status.textContent =
     "path: " + trail.length + " nodes, " + (trail.length - 1) + " hops";
+  status.className = "ok";
+  render();
+}
+
+// Phase 3q: calls-only path search. Sister of findAndShowDataPath.
+// The default Find shortest path uses the full union adjacency,
+// which is permissive but can return paths that hop through
+// imports / contains / references_type — not what the user
+// usually means when they say "show me how A calls B". This
+// strict variant walks the calls-only adjacency so the answer is
+// the literal call chain. Mirrors find_call_chain on the backend.
+function findAndShowCallPath() {
+  const fromQ = document.getElementById("path-from").value.trim();
+  const toQ = document.getElementById("path-to").value.trim();
+  const status = document.getElementById("path-status");
+  if (!fromQ || !toQ) {
+    status.textContent = "enter both endpoints";
+    status.className = "fail";
+    return;
+  }
+  const src = findSymbol(fromQ);
+  const dst = findSymbol(toQ);
+  if (!src || !dst) {
+    status.textContent =
+      (!src ? "no match for from" : "no match for to") + " — try a longer query";
+    status.className = "fail";
+    pathNodes.clear();
+    pathEdgeKeys.clear();
+    render();
+    return;
+  }
+  // Use the calls-only adjacency so the BFS walks only calls
+  // edges. The pure helper is the same shortestPath() — different
+  // adjacency map is the only thing that changes (matches the
+  // Phase 3h pattern).
+  const trail = shortestPath(src, dst, callSuccessors, nodeById);
+  if (!trail) {
+    status.textContent = "no call path found (no chain of calls edges)";
+    status.className = "fail";
+    pathNodes.clear();
+    pathEdgeKeys.clear();
+    render();
+    return;
+  }
+  pathNodes.clear();
+  pathEdgeKeys.clear();
+  for (const id of trail) pathNodes.add(id);
+  for (let i = 0; i < trail.length - 1; i++) {
+    const a = trail[i];
+    const b = trail[i + 1];
+    // Only encode the calls edge between this pair
+    for (const l of links) {
+      const ls = typeof l.source === "object" ? l.source.id : l.source;
+      const lt = typeof l.target === "object" ? l.target.id : l.target;
+      if (ls === a && lt === b && l.kind === "calls") {
+        pathEdgeKeys.add(l.kind + "|" + a + "|" + b);
+      }
+    }
+  }
+  status.textContent =
+    "call path: " + trail.length + " methods, " + (trail.length - 1) + " hops";
   status.className = "ok";
   render();
 }

@@ -428,6 +428,31 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3q: Find call path button is wired in (calls-only adjacency)", () => {
+    // The strict-call variant of the find_path button. Mirrors
+    // Find data path's design — same UI fields, different adjacency
+    // map (calls-only instead of field_of_type/aggregates).
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain('id="path-find-call"')
+    expect(html).toContain("function findAndShowCallPath")
+    expect(html).toContain("const callSuccessors")
+    expect(html).toContain('"calls"')
+    // The button click handler is wired
+    expect(html).toContain(
+      'document.getElementById("path-find-call").addEventListener',
+    )
+    // Status message uses the call-path-specific label
+    expect(html).toContain('"call path: "')
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3p-frontend: Unused fields panel is wired in", () => {
     // Pure inline computation walking links to find field nodes
     // with no incoming reads_field/writes_field. Pin the markers
