@@ -196,6 +196,27 @@ describe("graphJsonToHtml — structural assertions", () => {
     expect(html).toContain(".open-link")
     expect(html).toContain('"vscode://file"')
     expect(html).toContain("open in VS Code")
+
+    // Phase 3f: data-structure styling + "Data structure view" preset
+    // New kind colors (field, enum_variant) and edge colors
+    // (reads_field, writes_field, field_of_type, aggregates)
+    expect(html).toContain("field:")
+    expect(html).toContain("enum_variant:")
+    expect(html).toContain("field_of_type:")
+    expect(html).toContain("aggregates:")
+    expect(html).toContain("reads_field:")
+    expect(html).toContain("writes_field:")
+    // Per-edge-kind CSS classes (for the dashed/heavy styling)
+    expect(html).toContain(".link.field_of_type")
+    expect(html).toContain(".link.writes_field")
+    expect(html).toContain(".link.aggregates")
+    // The link's class attr now includes d.kind so the CSS hooks fire
+    expect(html).toContain('"link " + d.kind')
+    // New "Data structure view" preset button + handler
+    expect(html).toContain('id="preset-data"')
+    expect(html).toContain("function applyDataStructureView")
+    // Help overlay mentions the new preset
+    expect(html).toContain("Data structure view")
   })
 })
 

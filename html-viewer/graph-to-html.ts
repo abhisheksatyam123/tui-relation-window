@@ -373,6 +373,10 @@ export function graphJsonToHtml(graph: GraphJson): string {
   .node.cycle { stroke: #ff5b6b; stroke-width: 1.5; }
   .link.path-on { stroke: #c792ea; stroke-opacity: 0.95; stroke-width: 2.4; }
   .node.path-on { stroke: #c792ea; stroke-width: 2.5; }
+  /* Phase 3: data-structure edges */
+  .link.field_of_type { stroke-dasharray: 4 2; }
+  .link.writes_field  { stroke-dasharray: 6 3; }
+  .link.aggregates    { stroke-width: 1.6; stroke-opacity: 0.7; }
   #path-status {
     margin-top: 6px; font-size: 11px; color: var(--muted);
     min-height: 14px;
@@ -572,6 +576,7 @@ export function graphJsonToHtml(graph: GraphJson): string {
 
     <h2>Quick views</h2>
     <button class="preset" id="preset-modules">Module dependency view</button>
+    <button class="preset" id="preset-data">Data structure view</button>
     <button class="preset" id="preset-reset">Reset all filters</button>
 
     <h2>Find path</h2>
@@ -627,7 +632,7 @@ export function graphJsonToHtml(graph: GraphJson): string {
 
         <h3>Sidebar — paths</h3>
         <div class="item"><kbd>find</kbd><div class="desc">"Find path" runs directed BFS between two symbols, highlights the trail</div></div>
-        <div class="item"><kbd>presets</kbd><div class="desc">"Module dependency view" filters to module-only + imports-only in one click</div></div>
+        <div class="item"><kbd>presets</kbd><div class="desc">"Module dependency view" → module-only + imports-only. "Data structure view" → struct/class/interface/enum + field/variant nodes connected by contains/field_of_type/aggregates.</div></div>
 
         <h3>Persistence</h3>
         <div class="item"><kbd>url</kbd><div class="desc">focus, depth, direction, toggles, and filters all live in the URL hash — share or bookmark to round-trip the view</div></div>
@@ -642,16 +647,19 @@ export function graphJsonToHtml(graph: GraphJson): string {
 ${VIEWER_PURE_JS}
 const data = ${dataLiteral};
 const KIND_COLORS = {
-  module:     "#6ab1ff",
-  function:   "#9bd17f",
-  method:     "#7fc6c0",
-  class:      "#ffb86b",
-  struct:     "#ff8a65",
-  interface:  "#c792ea",
-  enum:       "#e5c07b",
-  typedef:    "#82aaff",
-  namespace:  "#f78c6c",
-  global_var: "#a3a8b8",
+  module:       "#6ab1ff",
+  function:     "#9bd17f",
+  method:       "#7fc6c0",
+  class:        "#ffb86b",
+  struct:       "#ff8a65",
+  interface:    "#c792ea",
+  enum:         "#e5c07b",
+  typedef:      "#82aaff",
+  namespace:    "#f78c6c",
+  global_var:   "#a3a8b8",
+  // Phase 3d: structural data hierarchy
+  field:        "#b48ead",
+  enum_variant: "#d5a0c0",
 };
 const EDGE_COLORS = {
   imports:         "#6ab1ff",
@@ -660,6 +668,11 @@ const EDGE_COLORS = {
   references_type: "#c792ea",
   implements:      "#e5c07b",
   extends:         "#ff8a65",
+  // Phase 3a/3b: data-structure edges
+  reads_field:     "#7fc6c0",
+  writes_field:    "#ff8a65",
+  field_of_type:   "#b48ead",
+  aggregates:      "#9b6fb0",
 };
 function colorFor(kind, table, fallback) {
   return table[kind] || fallback;
@@ -875,7 +888,9 @@ function render() {
       const t = typeof d.target === "object" ? d.target.id : d.target;
       const isCycle = cyclesOn && cycleEdgeKeys.has(d.kind + "|" + s + "|" + t);
       const isPath = pathEdgeKeys.has(d.kind + "|" + s + "|" + t);
-      let cls = "link";
+      // The d.kind class enables per-edge-kind CSS rules
+      // (.link.field_of_type, .link.writes_field, .link.aggregates, …).
+      let cls = "link " + d.kind;
       if (isCycle) cls += " cycle";
       if (isPath) cls += " path-on";
       return cls;
@@ -1389,7 +1404,26 @@ function applyResetView() {
   render();
   saveHashState();
 }
+function applyDataStructureView() {
+  // Show structs/classes/interfaces/enums + their fields/variants,
+  // connected by contains + field_of_type + aggregates edges. The
+  // dual of "Module dependency view" — that one shows package shape,
+  // this one shows what data each type holds and depends on.
+  activeKinds.clear();
+  for (const k of ["struct", "class", "interface", "enum", "field", "enum_variant", "typedef"]) {
+    activeKinds.add(k);
+  }
+  activeEdgeKinds.clear();
+  for (const k of ["contains", "field_of_type", "aggregates"]) {
+    activeEdgeKinds.add(k);
+  }
+  buildKindLegend();
+  buildEdgeLegend();
+  render();
+  saveHashState();
+}
 document.getElementById("preset-modules").addEventListener("click", applyModuleDepView);
+document.getElementById("preset-data").addEventListener("click", applyDataStructureView);
 document.getElementById("preset-reset").addEventListener("click", applyResetView);
 
 // Path-finding wiring: button click + Enter-key in either input.
