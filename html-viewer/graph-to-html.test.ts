@@ -428,6 +428,34 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3l-frontend: transitive data footprint walker is wired in", () => {
+    // The Phase 3j data footprint section now also walks calls
+    // edges from the focused method up to a bounded depth and
+    // collects every reads_field/writes_field from any reachable
+    // callee. Pin the markers so the BFS depth + transitive
+    // summary line don't get accidentally removed.
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain("TRANSITIVE_DATA_FOOTPRINT_DEPTH")
+    // The walker uses the existing outEdgesByKind buckets — keyed
+    // by edge_kind so it's a fast O(1) lookup per callee.
+    expect(html).toContain("buckets.calls")
+    expect(html).toContain("calleeBuckets.reads_field")
+    expect(html).toContain("calleeBuckets.writes_field")
+    // The summary line shows the transitive delta
+    expect(html).toContain("data-footprint-transitive")
+    expect(html).toContain("via ")
+    expect(html).toContain("transitiveReadsExtra")
+    expect(html).toContain("transitiveWritesExtra")
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3j: function/method data footprint section is wired into showInfo", () => {
     // The data footprint surfaces reads_field/writes_field outgoing
     // edges in a dedicated section when the focused node is a

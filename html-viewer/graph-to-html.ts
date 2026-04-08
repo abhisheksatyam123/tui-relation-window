@@ -361,6 +361,11 @@ export function graphJsonToHtml(graph: GraphJson): string {
     color: var(--muted);
     margin: 2px 0 6px 0;
   }
+  /* Phase 3l-frontend: secondary summary for transitive reach */
+  #info .data-footprint-transitive {
+    font-style: italic;
+    margin-top: -2px;
+  }
   #info .data-footprint-reads { color: #7fc6c0; }
   #info .data-footprint-writes { color: #ff8a65; }
   #info .data-footprint-group {
@@ -1408,7 +1413,51 @@ function showInfo(d) {
       if (link.kind === "reads_field") reads.push(dst);
       else if (link.kind === "writes_field") writes.push(dst);
     }
-    if (reads.length > 0 || writes.length > 0) {
+    // Phase 3l-frontend: BFS-walk calls edges from the focused
+    // method up to TRANSITIVE_DATA_FOOTPRINT_DEPTH hops, then
+    // collect every reads_field/writes_field outgoing from any
+    // reachable callee. This is the viewer-side companion to the
+    // find_api_data_footprint query intent — answers "what does
+    // this method ultimately touch via its call chain" without
+    // needing a backend round-trip. Bounded depth so the BFS
+    // stays cheap on big graphs.
+    const TRANSITIVE_DATA_FOOTPRINT_DEPTH = 4;
+    const transitiveReads = new Set(reads);
+    const transitiveWrites = new Set(writes);
+    let reachableCallees = 0;
+    {
+      const visited = new Set([d.id]);
+      let frontier = [d.id];
+      for (let hop = 0; hop < TRANSITIVE_DATA_FOOTPRINT_DEPTH; hop++) {
+        const next = [];
+        for (const id of frontier) {
+          const buckets = outEdgesByKind.get(id);
+          if (!buckets) continue;
+          const callTargets = buckets.calls || [];
+          for (const callee of callTargets) {
+            if (visited.has(callee)) continue;
+            visited.add(callee);
+            reachableCallees++;
+            next.push(callee);
+            // Pull every reads_field / writes_field this callee
+            // performs into the transitive sets.
+            const calleeBuckets = outEdgesByKind.get(callee);
+            if (!calleeBuckets) continue;
+            for (const r of calleeBuckets.reads_field || []) transitiveReads.add(r);
+            for (const w of calleeBuckets.writes_field || []) transitiveWrites.add(w);
+          }
+        }
+        if (next.length === 0) break;
+        frontier = next;
+      }
+    }
+    // The transitive sets are supersets of the direct lists. The
+    // "via callees" delta is what came from the BFS walk and not
+    // from the focused method's own outgoing edges.
+    const transitiveReadsExtra = transitiveReads.size - reads.length;
+    const transitiveWritesExtra = transitiveWrites.size - writes.length;
+
+    if (reads.length > 0 || writes.length > 0 || transitiveReadsExtra > 0 || transitiveWritesExtra > 0) {
       html += '<div class="section"><div class="section-title">Data footprint</div>';
       // Render the counts up front so the user has a one-glance summary
       html +=
@@ -1417,6 +1466,20 @@ function showInfo(d) {
         ' &middot; ' +
         '<span class="data-footprint-writes">writes: ' + writes.length + '</span>' +
         '</div>';
+      // If the call chain reaches more fields than the direct list,
+      // surface the delta as a second summary line. This is the
+      // value-add of Phase 3l-frontend: the user sees "this method
+      // looks small but actually touches 47 fields via its callees"
+      // without having to walk the call graph by hand.
+      if (transitiveReadsExtra > 0 || transitiveWritesExtra > 0) {
+        html +=
+          '<div class="data-footprint-summary data-footprint-transitive">' +
+          'via ' + reachableCallees + ' callee' + (reachableCallees === 1 ? '' : 's') +
+          ': <span class="data-footprint-reads">+' + transitiveReadsExtra + ' reads</span>' +
+          ' &middot; ' +
+          '<span class="data-footprint-writes">+' + transitiveWritesExtra + ' writes</span>' +
+          '</div>';
+      }
       // Render up to 6 reads + 6 writes as clickable rows
       const cap = 6;
       if (reads.length > 0) {
