@@ -76,7 +76,13 @@ async function main(): Promise<number> {
   }
 
   const html = graphJsonToHtml(parsed)
-  process.stdout.write(html)
+  // Use Bun.write so the call awaits the underlying flush instead
+  // of racing process.exit. process.stdout.write() returns a boolean
+  // and silently truncates large outputs (> ~64KB) when exit fires
+  // before the kernel buffer drains — caught the bug in the
+  // real-workspaces.test.ts pipeline test on opencode (~1MB HTML).
+  // @ts-expect-error — Bun-specific globals
+  await Bun.write(Bun.stdout, html)
   return 0
 }
 
