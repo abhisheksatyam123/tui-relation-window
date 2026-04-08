@@ -1,0 +1,286 @@
+{
+  "workspace": "/tmp/data-struct-fixture",
+  "snapshot_id": 1,
+  "total_nodes": 13,
+  "total_edges": 13,
+  "nodes": [
+    {
+      "id": "module:src/model.ts",
+      "kind": "module",
+      "file_path": "src/model.ts",
+      "line": null,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": null
+    },
+    {
+      "id": "module:src/model.ts#User",
+      "kind": "class",
+      "file_path": "src/model.ts",
+      "line": 5,
+      "end_line": 8,
+      "line_count": 4,
+      "exported": true,
+      "doc": null,
+      "owning_class": null
+    },
+    {
+      "id": "module:src/model.ts#User.id",
+      "kind": "field",
+      "file_path": "src/model.ts",
+      "line": 6,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": "User"
+    },
+    {
+      "id": "module:src/model.ts#User.name",
+      "kind": "field",
+      "file_path": "src/model.ts",
+      "line": 7,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": "User"
+    },
+    {
+      "id": "module:src/model.ts#Box",
+      "kind": "class",
+      "file_path": "src/model.ts",
+      "line": 10,
+      "end_line": 16,
+      "line_count": 7,
+      "exported": true,
+      "doc": null,
+      "owning_class": null
+    },
+    {
+      "id": "module:src/model.ts#Box.owner",
+      "kind": "field",
+      "file_path": "src/model.ts",
+      "line": 11,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": "Box"
+    },
+    {
+      "id": "module:src/model.ts#Box.members",
+      "kind": "field",
+      "file_path": "src/model.ts",
+      "line": 12,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": "Box"
+    },
+    {
+      "id": "module:src/model.ts#Box.fallback",
+      "kind": "field",
+      "file_path": "src/model.ts",
+      "line": 13,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": "Box"
+    },
+    {
+      "id": "module:src/model.ts#Status",
+      "kind": "enum",
+      "file_path": "src/model.ts",
+      "line": 18,
+      "end_line": 21,
+      "line_count": 4,
+      "exported": true,
+      "doc": null,
+      "owning_class": null
+    },
+    {
+      "id": "module:src/model.ts#Status.Active",
+      "kind": "enum_variant",
+      "file_path": "src/model.ts",
+      "line": 19,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": null
+    },
+    {
+      "id": "module:src/model.ts#Status.Inactive",
+      "kind": "enum_variant",
+      "file_path": "src/model.ts",
+      "line": 20,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": null
+    },
+    {
+      "id": "module:src/model.ts#Box.greet",
+      "kind": "method",
+      "file_path": "src/model.ts",
+      "line": 14,
+      "end_line": 15,
+      "line_count": 2,
+      "exported": false,
+      "doc": null,
+      "owning_class": "Box"
+    },
+    {
+      "id": "module:src/main.ts",
+      "kind": "module",
+      "file_path": "src/main.ts",
+      "line": null,
+      "end_line": null,
+      "line_count": null,
+      "exported": false,
+      "doc": null,
+      "owning_class": null
+    }
+  ],
+  "edges": [
+    {
+      "src": "module:src/main.ts",
+      "dst": "module:src/model.ts",
+      "kind": "imports",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts",
+      "dst": "module:src/model.ts#User",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts",
+      "dst": "module:src/model.ts#Box",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts",
+      "dst": "module:src/model.ts#Status",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#User",
+      "dst": "module:src/model.ts#User.id",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#User",
+      "dst": "module:src/model.ts#User.name",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#Box",
+      "dst": "module:src/model.ts#Box.owner",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#Box",
+      "dst": "module:src/model.ts#Box.members",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#Box",
+      "dst": "module:src/model.ts#Box.fallback",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#Box",
+      "dst": "module:src/model.ts#Box.greet",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#Status",
+      "dst": "module:src/model.ts#Status.Active",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#Status",
+      "dst": "module:src/model.ts#Status.Inactive",
+      "kind": "contains",
+      "resolution_kind": null,
+      "metadata": null
+    },
+    {
+      "src": "module:src/model.ts#Box.owner",
+      "dst": "module:src/model.ts#User",
+      "kind": "field_of_type",
+      "resolution_kind": null,
+      "metadata": {
+        "containment": "direct",
+        "typeExpr": "User"
+      }
+    },
+    {
+      "src": "module:src/model.ts#Box.members",
+      "dst": "module:src/model.ts#User",
+      "kind": "field_of_type",
+      "resolution_kind": null,
+      "metadata": {
+        "containment": "array",
+        "typeExpr": "User[]"
+      }
+    },
+    {
+      "src": "module:src/model.ts#Box.fallback",
+      "dst": "module:src/model.ts#User",
+      "kind": "field_of_type",
+      "resolution_kind": null,
+      "metadata": {
+        "containment": "optional",
+        "typeExpr": "User | undefined"
+      }
+    },
+    {
+      "src": "module:src/model.ts#Box",
+      "dst": "module:src/model.ts#User",
+      "kind": "aggregates",
+      "resolution_kind": null,
+      "metadata": {
+        "rolledUpFrom": "field_of_type"
+      }
+    },
+    {
+      "src": "module:src/model.ts#Box.greet",
+      "dst": "module:src/model.ts#Box.owner",
+      "kind": "reads_field",
+      "resolution_kind": null,
+      "metadata": {
+        "accessKind": "read",
+        "via": "this"
+      }
+    }
+  ]
+}

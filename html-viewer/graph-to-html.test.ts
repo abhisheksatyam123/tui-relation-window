@@ -21,11 +21,21 @@
  */
 
 import { describe, it, expect } from "bun:test"
+import { readFileSync } from "node:fs"
+import { join, dirname } from "node:path"
+import { fileURLToPath } from "node:url"
 import {
   graphJsonToHtml,
   VIEWER_PURE_JS,
   type GraphJson,
 } from "./graph-to-html"
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const dataStructFixturePath = join(
+  __dirname,
+  "__fixtures__",
+  "data-structure-graph.json",
+)
 
 function makeGraph(
   nodeIds: string[],
@@ -217,6 +227,137 @@ describe("graphJsonToHtml — structural assertions", () => {
     expect(html).toContain("function applyDataStructureView")
     // Help overlay mentions the new preset
     expect(html).toContain("Data structure view")
+  })
+})
+
+// ── Phase 3 fixture: data-structure graph (field nodes, enum_variants,
+// ── field_of_type with containment, aggregates rollup, reads_field).
+// This is the shape intelgraph's ts-core / rust-core extractors emit
+// after the c39df7e..b8f09c9 commit chain. Loading a checked-in fixture
+// keeps the test fast and decoupled from intelgraph's extraction code,
+// while still verifying the viewer correctly renders every Phase 3
+// element on a realistic-looking GraphJson.
+
+describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
+  const fixtureJson = readFileSync(dataStructFixturePath, "utf8")
+  const fixture = JSON.parse(fixtureJson) as GraphJson
+
+  it("renders a graph that contains field, enum_variant nodes and the new edge kinds", () => {
+    // Sanity-check the fixture itself first
+    const fields = fixture.nodes.filter((n) => n.kind === "field")
+    const variants = fixture.nodes.filter((n) => n.kind === "enum_variant")
+    const fotEdges = fixture.edges.filter((e) => e.kind === "field_of_type")
+    const aggEdges = fixture.edges.filter((e) => e.kind === "aggregates")
+    const readsEdges = fixture.edges.filter((e) => e.kind === "reads_field")
+    expect(fields.length).toBe(5)        // 2 User + 3 Box
+    expect(variants.length).toBe(2)      // Status.Active + Status.Inactive
+    expect(fotEdges.length).toBe(3)      // Box.owner / .members / .fallback
+    expect(aggEdges.length).toBe(1)      // Box → User
+    expect(readsEdges.length).toBe(1)    // Box.greet → Box.owner
+
+    // Render and verify the inlined data carries the Phase 3 elements.
+    // The viewer auto-discovers kinds and edge_kinds from data.nodes
+    // and data.edges, so the legends will pick them up.
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain("module:src/model.ts#User.id")
+    expect(html).toContain("module:src/model.ts#Box.members")
+    expect(html).toContain("module:src/model.ts#Status.Active")
+    expect(html).toContain("module:src/model.ts#Status.Inactive")
+
+    // Containment metadata flows through to the inlined JSON literal
+    expect(html).toContain('"containment":"direct"')
+    expect(html).toContain('"containment":"array"')
+    expect(html).toContain('"containment":"optional"')
+    // typeExpr too — used by the info panel
+    expect(html).toContain('"typeExpr":"User[]"')
+    expect(html).toContain('"typeExpr":"User | undefined"')
+
+    // The aggregates edge metadata flows through too
+    expect(html).toContain('"rolledUpFrom":"field_of_type"')
+
+    // Inlined script must still parse on this richer fixture
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
+  it("VIEWER_PURE_JS resolveSymbol can find a field via the suffix-after-# strategy", () => {
+    const fixture2 = JSON.parse(fixtureJson) as GraphJson
+    // Reuse the unit-test accessor to grab resolveSymbol from
+    // VIEWER_PURE_JS, then run it on real fixture node ids.
+    const accessor = `
+      ${VIEWER_PURE_JS}
+      return { resolveSymbol };
+    `
+    const fns = new Function(accessor)() as {
+      resolveSymbol: (q: string, ids: Set<string>) => string | null
+    }
+    const ids = new Set(fixture2.nodes.map((n) => n.id))
+
+    // The suffix-after-# strategy resolves "Box.members" to the
+    // canonical name without needing the user to type the full path.
+    expect(fns.resolveSymbol("Box.members", ids)).toBe(
+      "module:src/model.ts#Box.members",
+    )
+    // Substring fallback finds Status.Active by partial match
+    expect(fns.resolveSymbol("Status", ids)).not.toBeNull()
+  })
+
+  it("VIEWER_PURE_JS neighborhood walks the new contains/field_of_type edges correctly", () => {
+    const fixture3 = JSON.parse(fixtureJson) as GraphJson
+    const accessor = `
+      ${VIEWER_PURE_JS}
+      return { neighborhood };
+    `
+    const fns = new Function(accessor)() as {
+      neighborhood: (
+        rootId: string,
+        hops: number,
+        direction: "in" | "out" | "both",
+        succ: Map<string, Set<string>>,
+        pred: Map<string, Set<string>>,
+      ) => Set<string>
+    }
+    // Build the same directed adjacency the inlined viewer builds
+    const succ = new Map<string, Set<string>>()
+    const pred = new Map<string, Set<string>>()
+    for (const n of fixture3.nodes) {
+      succ.set(n.id, new Set())
+      pred.set(n.id, new Set())
+    }
+    for (const e of fixture3.edges) {
+      succ.get(e.src)?.add(e.dst)
+      pred.get(e.dst)?.add(e.src)
+    }
+    // From Box at depth 1 (forward) we should reach: Box itself,
+    // its 4 contained members (owner, members, fallback, greet),
+    // and User via the aggregates edge.
+    const out = fns.neighborhood(
+      "module:src/model.ts#Box",
+      1,
+      "out",
+      succ,
+      pred,
+    )
+    expect(out.has("module:src/model.ts#Box")).toBe(true)
+    expect(out.has("module:src/model.ts#Box.owner")).toBe(true)
+    expect(out.has("module:src/model.ts#Box.members")).toBe(true)
+    expect(out.has("module:src/model.ts#Box.fallback")).toBe(true)
+    expect(out.has("module:src/model.ts#Box.greet")).toBe(true)
+    expect(out.has("module:src/model.ts#User")).toBe(true) // via aggregates
+  })
+
+  it("renders within the size budget for a real-shaped data-structure graph", () => {
+    const html = graphJsonToHtml(fixture)
+    // 13 nodes + 17 edges with metadata. Reasonable budget: 700KB
+    // (most of that is the static viewer template + d3 hooks).
+    expect(html.length).toBeLessThan(700_000)
+    // And it must be a real document, not a stub
+    expect(html.length).toBeGreaterThan(50_000)
   })
 })
 
