@@ -233,6 +233,14 @@ describe("graphJsonToHtml — structural assertions", () => {
     expect(html).toContain('id="preset-flow"')
     expect(html).toContain("function applyDataFlowView")
     expect(html).toContain("Data flow")
+
+    // Field type info panel: when a field is focused, the info
+    // panel surfaces the typeExpr + containment from the
+    // field_of_type edge metadata. CSS classes wired in.
+    expect(html).toContain(".field-type-row")
+    expect(html).toContain(".type-expr")
+    expect(html).toContain(".containment")
+    expect(html).toContain('d.kind === "field"')
   })
 })
 
@@ -364,6 +372,32 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     expect(html.length).toBeLessThan(700_000)
     // And it must be a real document, not a stub
     expect(html.length).toBeGreaterThan(50_000)
+  })
+
+  it("inlines the typeExpr metadata so the field type panel can render it on click", () => {
+    // The data-structure fixture has Box.members: User[] with
+    // typeExpr "User[]" and containment "array". When the user
+    // clicks Box.members, the showInfo function reads the
+    // field_of_type edge metadata from the inlined `links` array
+    // and emits a Type panel. We verify the metadata flows through
+    // to the inlined data block (the click-time rendering itself
+    // requires a browser, but if the metadata is in the data block
+    // and the field-type rendering code is in the script, the two
+    // sides connect at runtime).
+    const html = graphJsonToHtml(fixture)
+
+    // Metadata in the inlined data block
+    expect(html).toContain('"typeExpr":"User[]"')
+    expect(html).toContain('"typeExpr":"User"')
+    expect(html).toContain('"typeExpr":"User | undefined"')
+
+    // The showInfo function has the field-kind branch that reads
+    // links[i].metadata and renders the type panel
+    expect(html).toContain('d.kind === "field"')
+    expect(html).toContain('link.kind !== "field_of_type"')
+    expect(html).toContain('field-type-row')
+    expect(html).toContain('type-expr')
+    expect(html).toContain('section-title">Type</div>')
   })
 })
 

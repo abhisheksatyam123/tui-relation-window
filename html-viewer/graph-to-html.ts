@@ -339,6 +339,22 @@ export function graphJsonToHtml(graph: GraphJson): string {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     flex: 1; min-width: 0;
   }
+  #info .field-type-row {
+    margin: 4px 0;
+    padding: 4px 6px;
+    background: rgba(180, 142, 173, 0.08);
+    border-left: 2px solid #b48ead;
+    border-radius: 2px;
+  }
+  #info .field-type-row .type-expr {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 11px; color: var(--text);
+    word-break: break-all;
+  }
+  #info .field-type-row .containment {
+    font-size: 10px; color: var(--muted);
+    margin: 2px 0;
+  }
   #info .open-link {
     display: inline-block;
     margin-top: 6px;
@@ -1214,6 +1230,52 @@ function showInfo(d) {
   let html = rows
     .map((r) => '<div class="row"><span class="key">' + r[0] + '</span> ' + escapeHtml(String(r[1])) + '</div>')
     .join("");
+
+  // Field nodes get a prominent "Type:" badge showing the source
+  // type expression (e.g. "Map<string, User>", "Vec<Foo>") plus
+  // the resolved containment chain ("map", "vec.option", etc.).
+  // Pulled from the field_of_type edge metadata that ts-core /
+  // rust-core attach in phases 3a + 3c. Most useful info for a
+  // user examining a field — surface it above the neighbor
+  // sections instead of burying it in the auto-rendered metadata.
+  if (d.kind === "field") {
+    const typeRows = [];
+    for (const link of links) {
+      if (link.kind !== "field_of_type") continue;
+      const src = typeof link.source === "object" ? link.source.id : link.source;
+      if (src !== d.id) continue;
+      const dst = typeof link.target === "object" ? link.target.id : link.target;
+      const meta = link.metadata || {};
+      typeRows.push({
+        target: dst,
+        containment: meta.containment || "direct",
+        typeExpr: meta.typeExpr || "",
+        keyType: meta.keyType || null,
+      });
+    }
+    if (typeRows.length > 0) {
+      html += '<div class="section"><div class="section-title">Type</div>';
+      for (const tr of typeRows) {
+        html +=
+          '<div class="field-type-row">' +
+          (tr.typeExpr
+            ? '<div class="type-expr">' + escapeHtml(tr.typeExpr) + '</div>'
+            : "") +
+          '<div class="containment">' +
+          escapeHtml(tr.containment) +
+          (tr.keyType ? ' &middot; key: ' + escapeHtml(tr.keyType) : "") +
+          '</div>' +
+          '<div class="neighbor-row" data-target="' +
+          escapeHtml(tr.target) +
+          '">' +
+          '<span class="kind">→</span><span class="name">' +
+          escapeHtml(shortName(tr.target)) +
+          '</span></div>' +
+          '</div>';
+      }
+      html += '</div>';
+    }
+  }
 
   // Add an "open in VS Code" link when the node has a usable
   // file_path. The pure URL builder lives in VIEWER_PURE_JS so
