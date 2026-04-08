@@ -641,6 +641,12 @@ export function graphJsonToHtml(graph: GraphJson): string {
     <h2>Top touched types</h2>
     <div id="top-touched"></div>
 
+    <h2>Top mutators</h2>
+    <div id="top-mutators"></div>
+
+    <h2>Top readers</h2>
+    <div id="top-readers"></div>
+
     <h2>Symbol kinds</h2>
     <div id="kind-legend"></div>
 
@@ -1687,6 +1693,60 @@ function buildHubPanel(containerId, edgeKind, validNodeKinds) {
   }
 }
 
+// Phase 3o-frontend: viewer-side companion to find_top_field_writers
+// and find_top_field_readers. Counts DISTINCT field targets per
+// source method via the supplied edge_kind. Symmetric to the
+// existing Top called functions list, but for field-mutation
+// (writes_field) or field-consumption (reads_field) instead of
+// calls. Surfaces the methods doing the most state mutation /
+// reading.
+function buildTopFieldAccessorsPanel(containerId, edgeKind) {
+  const accessors = new Map(); // src → Set of distinct field targets
+  for (const l of links) {
+    if (l.kind !== edgeKind) continue;
+    const src = typeof l.source === "object" ? l.source.id : l.source;
+    const dst = typeof l.target === "object" ? l.target.id : l.target;
+    const node = nodeById.get(src);
+    if (!node) continue;
+    if (node.kind !== "function" && node.kind !== "method") continue;
+    let set = accessors.get(src);
+    if (!set) {
+      set = new Set();
+      accessors.set(src, set);
+    }
+    set.add(dst);
+  }
+  const ranked = [];
+  for (const [id, fields] of accessors) {
+    const node = nodeById.get(id);
+    if (!node) continue;
+    ranked.push({ id, count: fields.size, node });
+  }
+  ranked.sort((a, b) => b.count - a.count);
+  const top = ranked.slice(0, 8);
+  const container = document.getElementById(containerId);
+  container.innerHTML = "";
+  if (top.length === 0) {
+    container.innerHTML = '<div class="hub-row" style="cursor:default"><div class="name" style="color:var(--muted);font-style:italic">none</div></div>';
+    return;
+  }
+  for (const hub of top) {
+    const row = document.createElement("div");
+    row.className = "hub-row";
+    row.title = hub.id;
+    row.innerHTML =
+      '<div class="deg">' + hub.count + '</div>' +
+      '<div class="name">' + escapeHtml(shortName(hub.id)) + '</div>';
+    row.onclick = () => {
+      focused = hub.id;
+      applyFocus();
+      showInfo(hub.node);
+      saveHashState();
+    };
+    container.appendChild(row);
+  }
+}
+
 // Phase 3m-frontend: viewer-side companion to find_top_touched_types.
 // Two-hop walk: for each (class/struct/interface, field) pair via
 // contains, count DISTINCT sources of reads_field/writes_field
@@ -2044,6 +2104,8 @@ buildEdgeLegend();
 buildHubPanel("top-imported", "imports", new Set(["module"]));
 buildHubPanel("top-called", "calls", new Set(["function", "method"]));
 buildTopTouchedTypesPanel("top-touched");
+buildTopFieldAccessorsPanel("top-mutators", "writes_field");
+buildTopFieldAccessorsPanel("top-readers", "reads_field");
 
 // Search: as the user types, highlight EVERY matching node (not
 // just the first) and show a count. The first match is also

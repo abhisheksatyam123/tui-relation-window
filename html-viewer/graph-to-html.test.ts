@@ -428,6 +428,28 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3o-frontend: Top mutators / Top readers hub panels are wired in", () => {
+    // Symmetric to Top touched types but from the API side. Pin
+    // the markers + the parameterized helper so a future refactor
+    // doesn't lose the wiring.
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain('<h2>Top mutators</h2>')
+    expect(html).toContain('id="top-mutators"')
+    expect(html).toContain('<h2>Top readers</h2>')
+    expect(html).toContain('id="top-readers"')
+    expect(html).toContain("function buildTopFieldAccessorsPanel")
+    expect(html).toContain('buildTopFieldAccessorsPanel("top-mutators", "writes_field")')
+    expect(html).toContain('buildTopFieldAccessorsPanel("top-readers", "reads_field")')
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3m-frontend: Top touched types panel is wired in", () => {
     // The data-side analog of the Top called functions hub panel.
     // Pin the markers so a future refactor doesn't lose the panel.
