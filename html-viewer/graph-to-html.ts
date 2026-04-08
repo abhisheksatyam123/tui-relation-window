@@ -1315,6 +1315,82 @@ function showInfo(d) {
     }
   }
 
+  // Phase 3k: type "touched by" section. When the focused node is
+  // a class/interface/struct, find all the APIs that read or write
+  // any of its fields. Symmetric to the function data footprint —
+  // answers "which methods touch this type's data" without making
+  // the user click each field one at a time. Walks:
+  //   1. The class's own contains edges → its fields
+  //   2. Each field's incoming reads_field / writes_field edges
+  //      → the methods/functions touching it
+  // Deduped per (api, op) pair, since a single method can touch
+  // multiple fields of the same class.
+  if (d.kind === "class" || d.kind === "interface" || d.kind === "struct") {
+    const ownFields = new Set();
+    for (const link of links) {
+      if (link.kind !== "contains") continue;
+      const src = typeof link.source === "object" ? link.source.id : link.source;
+      if (src !== d.id) continue;
+      const dst = typeof link.target === "object" ? link.target.id : link.target;
+      const dstNode = nodeById.get(dst);
+      if (dstNode && dstNode.kind === "field") ownFields.add(dst);
+    }
+    if (ownFields.size > 0) {
+      // Walk every link looking for reads_field / writes_field edges
+      // landing on one of our fields. Map each touching api → which
+      // ops it performs ("R", "W", or "RW") so the rendered row
+      // collapses the detail.
+      const touchingApi = new Map();
+      for (const link of links) {
+        if (link.kind !== "reads_field" && link.kind !== "writes_field") continue;
+        const dst = typeof link.target === "object" ? link.target.id : link.target;
+        if (!ownFields.has(dst)) continue;
+        const src = typeof link.source === "object" ? link.source.id : link.source;
+        const op = link.kind === "reads_field" ? "R" : "W";
+        const existing = touchingApi.get(src);
+        if (!existing) {
+          touchingApi.set(src, op);
+        } else if (existing !== op && existing !== "RW") {
+          touchingApi.set(src, "RW");
+        }
+      }
+      if (touchingApi.size > 0) {
+        let nReaders = 0;
+        let nWriters = 0;
+        for (const op of touchingApi.values()) {
+          if (op === "R" || op === "RW") nReaders++;
+          if (op === "W" || op === "RW") nWriters++;
+        }
+        html += '<div class="section"><div class="section-title">Touched by APIs</div>';
+        html +=
+          '<div class="data-footprint-summary">' +
+          '<span class="data-footprint-reads">readers: ' + nReaders + '</span>' +
+          ' &middot; ' +
+          '<span class="data-footprint-writes">writers: ' + nWriters + '</span>' +
+          '</div>';
+        // List up to 8 touching APIs (most types have a small handful)
+        const cap = 8;
+        const entries = Array.from(touchingApi.entries()).slice(0, cap);
+        html += '<div class="data-footprint-group">';
+        for (const [api, op] of entries) {
+          html +=
+            '<div class="neighbor-row" data-target="' +
+            escapeHtml(api) +
+            '">' +
+            '<span class="kind">' + op + '</span>' +
+            '<span class="name">' +
+            escapeHtml(shortName(api)) +
+            '</span></div>';
+        }
+        if (touchingApi.size > cap) {
+          html += '<div class="data-footprint-more">+' + (touchingApi.size - cap) + ' more</div>';
+        }
+        html += '</div>';
+        html += '</div>';
+      }
+    }
+  }
+
   // Phase 3j: function/method data footprint. When the focused node
   // is an API (function/method), surface its reads_field/writes_field
   // outgoing edges in a dedicated section so the user can see what

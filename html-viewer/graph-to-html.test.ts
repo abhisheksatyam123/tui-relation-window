@@ -397,6 +397,37 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     ).not.toThrow()
   })
 
+  it("Phase 3k: type 'Touched by APIs' section is wired into showInfo", () => {
+    // The symmetric counterpart to Phase 3j: when the focused node
+    // is a class/interface/struct, walk its contained fields and
+    // collect every method/function with an incoming reads_field /
+    // writes_field edge. Pin the markers so a future refactor
+    // doesn't silently lose the wiring.
+    const html = graphJsonToHtml(fixture)
+    expect(html).toContain(
+      '"class" || d.kind === "interface" || d.kind === "struct"',
+    )
+    expect(html).toContain('"section-title">Touched by APIs')
+    // The two-step walk uses contains to find own fields, then
+    // reads_field / writes_field to find touching APIs
+    expect(html).toContain('"contains"')
+    expect(html).toContain('"reads_field"')
+    expect(html).toContain('"writes_field"')
+    // The R / W / RW collapse for an api that does both
+    expect(html).toContain('"RW"')
+    // Reuses the data-footprint summary CSS hooks from Phase 3j
+    expect(html).toContain("readers: ")
+    expect(html).toContain("writers: ")
+    // Inlined script must still parse
+    const start = html.indexOf("<script>")
+    const end = html.indexOf("</script>", start)
+    expect(start).toBeGreaterThan(0)
+    const inlined = html.substring(start + "<script>".length, end)
+    expect(() =>
+      new Function("document", "window", "d3", inlined),
+    ).not.toThrow()
+  })
+
   it("Phase 3j: function/method data footprint section is wired into showInfo", () => {
     // The data footprint surfaces reads_field/writes_field outgoing
     // edges in a dedicated section when the focused node is a
