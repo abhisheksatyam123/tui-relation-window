@@ -496,6 +496,12 @@ describe("graphJsonToHtml — Phase 3 data-structure rendering", () => {
     // Phase 3w + 3x rows added later
     expect(html).toContain('id="health-recursive-row"')
     expect(html).toContain('id="health-inline-row"')
+    // The cycle rows pass enableCycles=true so clicking them
+    // turns the global cycles highlight on (call cycles + struct
+    // cycles only — the others are not 2-cycle patterns)
+    expect(html).toContain('"health-call-cycles-row", "health-call-cycles", callCycleNodes, true')
+    expect(html).toContain('"health-struct-cycles-row", "health-struct-cycles", structCycleNodes, true')
+    expect(html).toContain('"health-unused-fields-row", "health-unused-fields", unusedFieldNodes, false')
     // The function that fills them in
     expect(html).toContain("function buildHealthBadge")
     expect(html).toContain("buildHealthBadge()")

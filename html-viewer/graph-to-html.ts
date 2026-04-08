@@ -2156,8 +2156,11 @@ function buildHealthBadge() {
   }
 
   // Render each row, wiring a click handler that focuses the first
-  // instance when the count is > 0.
-  const renderRow = (rowId, valueId, nodes) => {
+  // instance when the count is > 0. The optional fourth arg
+  // enableCycles flips the global cycles overlay on so the user
+  // immediately SEES the cycle in the rendered graph instead of
+  // just jumping to a node and wondering where the rest is.
+  const renderRow = (rowId, valueId, nodes, enableCycles) => {
     const row = document.getElementById(rowId);
     const valueEl = document.getElementById(valueId);
     if (!row || !valueEl) return;
@@ -2166,11 +2169,21 @@ function buildHealthBadge() {
       row.classList.add("has-issues");
       row.classList.remove("clean");
       row.onclick = () => {
+        if (enableCycles && !cyclesOn) {
+          cyclesOn = true;
+          const ct = document.getElementById("cycle-toggle");
+          if (ct) ct.classList.remove("disabled");
+        }
         const firstId = nodes[0];
         if (nodeById.has(firstId)) {
           focused = firstId;
           applyFocus();
           showInfo(nodeById.get(firstId));
+          saveHashState();
+        } else if (enableCycles) {
+          // Cycle row with no resolvable first node — still
+          // re-render so the overlay flips on
+          render();
           saveHashState();
         }
       };
@@ -2180,12 +2193,12 @@ function buildHealthBadge() {
       row.onclick = null;
     }
   };
-  renderRow("health-call-cycles-row", "health-call-cycles", callCycleNodes);
-  renderRow("health-struct-cycles-row", "health-struct-cycles", structCycleNodes);
-  renderRow("health-unused-fields-row", "health-unused-fields", unusedFieldNodes);
-  renderRow("health-orphan-types-row", "health-orphan-types", orphanTypeNodes);
-  renderRow("health-recursive-row", "health-recursive", recursiveNodes);
-  renderRow("health-inline-row", "health-inline", inlineCandidateNodes);
+  renderRow("health-call-cycles-row", "health-call-cycles", callCycleNodes, true);
+  renderRow("health-struct-cycles-row", "health-struct-cycles", structCycleNodes, true);
+  renderRow("health-unused-fields-row", "health-unused-fields", unusedFieldNodes, false);
+  renderRow("health-orphan-types-row", "health-orphan-types", orphanTypeNodes, false);
+  renderRow("health-recursive-row", "health-recursive", recursiveNodes, false);
+  renderRow("health-inline-row", "health-inline", inlineCandidateNodes, false);
 }
 
 // Phase 3o-frontend: viewer-side companion to find_top_field_writers
