@@ -128,3 +128,67 @@ export function queryResultToClassRows(result: IntelligenceQueryResult): ClassRo
     kind: typeof n['kind'] === 'string' ? n['kind'] : undefined,
   }));
 }
+
+export type TypeConsumerRow = {
+  consumer: string;
+  filePath?: string;
+  lineNumber?: number;
+  kind?: string;
+};
+
+export type TypeFieldRow = {
+  field: string;
+  fieldType?: string;
+  filePath?: string;
+  lineNumber?: number;
+};
+
+export type FieldAccessRow = {
+  accessor: string;
+  fieldName?: string;
+  filePath?: string;
+  lineNumber?: number;
+  accessKind: 'read' | 'write';
+};
+
+export type TypeAggregatorRow = {
+  aggregator: string;
+  filePath?: string;
+  lineNumber?: number;
+};
+
+export function queryResultToTypeConsumerRows(result: IntelligenceQueryResult): TypeConsumerRow[] {
+  return (result?.data?.nodes ?? []).map((n) => ({
+    consumer: String(n['canonical_name'] ?? n['symbol'] ?? n['name'] ?? ''),
+    filePath: typeof (n['file_path'] ?? n['filePath']) === 'string' ? String(n['file_path'] ?? n['filePath']) : undefined,
+    lineNumber: typeof (n['line_number'] ?? n['lineNumber']) === 'number' ? Number(n['line_number'] ?? n['lineNumber']) : undefined,
+    kind: typeof n['kind'] === 'string' ? n['kind'] : undefined,
+  }));
+}
+
+export function queryResultToTypeFieldRows(result: IntelligenceQueryResult): TypeFieldRow[] {
+  return (result?.data?.nodes ?? []).map((n) => ({
+    field: String(n['canonical_name'] ?? n['symbol'] ?? n['name'] ?? ''),
+    fieldType: typeof n['field_type'] === 'string' ? n['field_type'] : undefined,
+    filePath: typeof (n['file_path'] ?? n['filePath']) === 'string' ? String(n['file_path'] ?? n['filePath']) : undefined,
+    lineNumber: typeof (n['line_number'] ?? n['lineNumber']) === 'number' ? Number(n['line_number'] ?? n['lineNumber']) : undefined,
+  }));
+}
+
+export function queryResultToFieldAccessRows(result: IntelligenceQueryResult, accessKind: 'read' | 'write'): FieldAccessRow[] {
+  return (result?.data?.nodes ?? []).map((n) => ({
+    accessor: String(n['canonical_name'] ?? n['symbol'] ?? n['name'] ?? ''),
+    fieldName: typeof n['field_name'] === 'string' ? n['field_name'] : undefined,
+    filePath: typeof (n['file_path'] ?? n['filePath']) === 'string' ? String(n['file_path'] ?? n['filePath']) : undefined,
+    lineNumber: typeof (n['line_number'] ?? n['lineNumber']) === 'number' ? Number(n['line_number'] ?? n['lineNumber']) : undefined,
+    accessKind,
+  }));
+}
+
+export function queryResultToTypeAggregatorRows(result: IntelligenceQueryResult): TypeAggregatorRow[] {
+  return (result?.data?.nodes ?? []).map((n) => ({
+    aggregator: String(n['canonical_name'] ?? n['symbol'] ?? n['name'] ?? ''),
+    filePath: typeof (n['file_path'] ?? n['filePath']) === 'string' ? String(n['file_path'] ?? n['filePath']) : undefined,
+    lineNumber: typeof (n['line_number'] ?? n['lineNumber']) === 'number' ? Number(n['line_number'] ?? n['lineNumber']) : undefined,
+  }));
+}

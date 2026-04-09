@@ -95,7 +95,19 @@ export async function fetchRelationsFromIntelgraph(query: BackendQuery): Promise
     throw new Error('MCP initialize did not return session id');
   }
 
-  const cacheAllowed = await isIndexReadyForCache(mcpUrl, sessionId);
+  // Detect workspace backend kind: "lsp" (clangd, C/C++) or "graph" (SQLite, TS/Rust).
+  // This determines whether to use lsp_hover + get_callers or intelligence_query.
+  let backendKind: 'lsp' | 'graph' = 'lsp';
+  try {
+    const infoText = await callTool(mcpUrl, sessionId, 'intelligence_backend_info', {});
+    const info = typeof infoText === 'string' ? JSON.parse(infoText) : infoText;
+    backendKind = info.backend === 'graph' ? 'graph' : 'lsp';
+    logInfo('backend', 'workspace backend kind', { backend: backendKind, language: info.language });
+  } catch {
+    logWarn('backend', 'intelligence_backend_info not available, defaulting to lsp');
+  }
+
+  const cacheAllowed = backendKind === 'lsp' ? await isIndexReadyForCache(mcpUrl, sessionId) : true;
 
   const point = {
     file: resolve(query.filePath),
@@ -103,22 +115,61 @@ export async function fetchRelationsFromIntelgraph(query: BackendQuery): Promise
     character: query.character,
   };
 
-  const resolved = await resolveBestPointForSymbol(mcpUrl, sessionId, point);
-  const root = parseHoverForRoot(resolved.hoverText);
-  logInfo('backend', 'symbol point resolved', {
+  // ── Symbol resolution: route by backend kind ──
+  let root: { name: string; symbolKind: number };
+
+  if (backendKind === 'graph') {
+    // Graph backend: resolve symbol from SQLite via find_symbol_at_location
+    root = { name: 'unknown_symbol', symbolKind: 12 };
+    {
+      // snapshotId=0 → daemon auto-resolves to latest ready snapshot
+      const snapshotId = getResolvedSnapshotId(workspaceRoot) || 0;
+      try {
+        const relFile = point.file.startsWith(workspaceRoot + '/')
+          ? point.file.slice(workspaceRoot.length + 1)
+          : point.file;
+        const symText = await callTool(mcpUrl, sessionId, 'intelligence_query', {
+          intent: 'find_symbol_at_location',
+          snapshotId,
+          filePath: relFile,
+          lineNumber: point.line,
+        });
+        const symParsed = typeof symText === 'string' ? JSON.parse(symText) : symText;
+        const nodes = symParsed?.data?.nodes ?? symParsed?.nodes ?? [];
+        if (nodes.length > 0) {
+          const sym = nodes[0];
+          const cn = sym.canonical_name || sym.callee || '';
+          const hashIdx = cn.lastIndexOf('#');
+          root = {
+            name: hashIdx >= 0 ? cn.slice(hashIdx + 1) : cn,
+            symbolKind: mapKindToLsp(sym.kind),
+          };
+        }
+      } catch (err) {
+        logWarn('backend', 'graph symbol resolution failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  } else {
+    // LSP backend: resolve symbol via clangd hover
+    const resolved = await resolveBestPointForSymbol(mcpUrl, sessionId, point);
+    root = parseHoverForRoot(resolved.hoverText);
+  }
+
+  logInfo('backend', 'symbol resolved', {
     requested: point,
-    resolved: resolved.point,
     root: root.name,
-    probed: resolved.probed,
+    backend: backendKind,
   });
 
   // ── CACHE LOOKUP ──
   const db = initCache(workspaceRoot);
   const cacheQuery: CacheQuery = {
     workspaceRoot,
-    filePath: resolved.point.file,
-    line: resolved.point.line,
-    character: resolved.point.character,
+    filePath: point.file,
+    line: point.line,
+    character: point.character,
     mode: query.mode,
     resolvedSymbol: root.name,
   };
@@ -144,25 +195,80 @@ export async function fetchRelationsFromIntelgraph(query: BackendQuery): Promise
     logWarn('backend', 'cache disabled while index not ready', { symbol: root.name });
   }
 
-  // ── CACHE MISS: single incoming API path (get_callers) ──
+  // ── CACHE MISS: incoming callers — route by backend kind ──
   if (query.mode === 'incoming') {
     let calledBy: CallerNode[] = [];
-    const getCallersText = await callTool(mcpUrl, sessionId, 'get_callers', {
-      file: resolved.point.file,
-      line: resolved.point.line,
-      character: resolved.point.character,
-      snapshotId: getResolvedSnapshotId(workspaceRoot) > 0
-        ? getResolvedSnapshotId(workspaceRoot)
-        : undefined,
-      maxNodes: 50,
-      resolve: true,
-    });
-    calledBy = parseGetCallersResponse(getCallersText, workspaceRoot);
-    logInfo('backend', 'get-callers-success', {
-      rootName: root.name,
-      callerCount: calledBy.length,
-      source: 'get_callers',
-    });
+
+    if (backendKind === 'graph') {
+      if (root.name !== 'unknown_symbol') {
+        try {
+          // Pick intents based on symbol kind for richer results.
+          // For methods: also try the parent class name.
+          const symbolNames = [root.name];
+          const dotIdx = root.name.indexOf('.');
+          if (dotIdx > 0) symbolNames.push(root.name.slice(0, dotIdx));
+
+          const kind = root.symbolKind;
+          // Classes/interfaces/structs: who uses, extends, implements this type?
+          // Functions/methods: who calls this?
+          // Modules: who imports this?
+          const intents: string[] =
+            kind === 5 || kind === 11 || kind === 23 // Class, Interface, Struct
+              ? ['find_type_consumers', 'find_class_subtypes', 'find_interface_implementors', 'who_calls_api']
+              : kind === 2 // Module
+                ? ['find_module_dependents']
+                : ['who_calls_api'];
+
+          for (const sym of symbolNames) {
+            for (const intent of intents) {
+              const result = await intelligenceQuery({
+                workspaceRoot,
+                intent: intent as any,
+                params: { symbol: sym, maxNodes: 50 },
+                snapshotId: getResolvedSnapshotId(workspaceRoot) || 0,
+                mcpUrl,
+              });
+              for (const row of (result.data?.nodes ?? [])) {
+                const name = String(row['caller'] ?? row['canonical_name'] ?? row['symbol'] ?? '');
+                if (!name) continue;
+                const hashIdx = name.lastIndexOf('#');
+                const shortName = hashIdx >= 0 ? name.slice(hashIdx + 1) : name;
+                const fp = String(row['file_path'] ?? row['filePath'] ?? '');
+                const ln = Number(row['line_number'] ?? row['lineNumber'] ?? row['line'] ?? 0);
+                // Dedupe
+                if (calledBy.some(c => c.caller === shortName && c.filePath === (fp.startsWith('/') ? fp : resolve(workspaceRoot, fp)) && c.lineNumber === ln)) continue;
+                calledBy.push({
+                  caller: shortName,
+                  filePath: fp.startsWith('/') ? fp : resolve(workspaceRoot, fp),
+                  lineNumber: ln,
+                  symbolKind: mapKindToLsp(String(row['kind'] ?? '')),
+                });
+              }
+            }
+            if (calledBy.length > 0) break;
+          }
+          logInfo('backend', 'incoming via graph', { rootName: root.name, kind, callerCount: calledBy.length, intents });
+        } catch (err) {
+          logWarn('backend', 'graph incoming query failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    } else {
+      // LSP backend: use clangd get_callers
+      const getCallersText = await callTool(mcpUrl, sessionId, 'get_callers', {
+        file: point.file,
+        line: point.line,
+        character: point.character,
+        snapshotId: getResolvedSnapshotId(workspaceRoot) > 0
+          ? getResolvedSnapshotId(workspaceRoot)
+          : undefined,
+        maxNodes: 50,
+        resolve: true,
+      });
+      calledBy = parseGetCallersResponse(getCallersText, workspaceRoot);
+      logInfo('backend', 'incoming callers via lsp', { rootName: root.name, callerCount: calledBy.length });
+    }
 
     calledBy = reclassifyRegistrationLikeCallers(
       rankIncomingCallers(dedupeIncomingByCanonicalCaller(calledBy)),
@@ -179,9 +285,9 @@ export async function fetchRelationsFromIntelgraph(query: BackendQuery): Promise
       result: {
         [root.name]: {
           symbolKind: root.symbolKind,
-          filePath: resolved.point.file,
-          lineNumber: resolved.point.line,
-          character: resolved.point.character,
+          filePath: point.file,
+          lineNumber: point.line,
+          character: point.character,
           calledBy,
         },
       },
@@ -197,42 +303,85 @@ export async function fetchRelationsFromIntelgraph(query: BackendQuery): Promise
     return payload;
   }
 
+  // ── Outgoing callees — route by backend kind ──
   let calls: CalleeNode[] = [];
-  try {
-    const outgoingSnapshotId = getResolvedSnapshotId(workspaceRoot);
-    if (outgoingSnapshotId <= 0) {
-      throw new Error('no snapshot available — skipping intelligence_query for outgoing');
+  if (backendKind === 'graph') {
+    if (root.name !== 'unknown_symbol') {
+      try {
+        const symbolNames = [root.name];
+        const dotIdx = root.name.indexOf('.');
+        if (dotIdx > 0) symbolNames.push(root.name.slice(0, dotIdx));
+
+        const kind = root.symbolKind;
+        // Classes: what methods does it contain, what does it extend, what types does it reference?
+        // Functions: what does it call?
+        // Modules: what does it import, what symbols does it contain?
+        const intents: string[] =
+          kind === 5 || kind === 11 || kind === 23
+            ? ['find_module_symbols', 'find_class_inheritance', 'find_type_dependencies', 'what_api_calls']
+            : kind === 2
+              ? ['find_module_imports', 'find_module_symbols']
+              : ['what_api_calls'];
+
+        for (const sym of symbolNames) {
+          for (const intent of intents) {
+            const result = await intelligenceQuery({
+              workspaceRoot,
+              intent: intent as any,
+              params: { symbol: sym, maxNodes: 50 },
+              snapshotId: getResolvedSnapshotId(workspaceRoot) || 0,
+              mcpUrl,
+            });
+            for (const row of (result.data?.nodes ?? [])) {
+              const name = String(row['callee'] ?? row['canonical_name'] ?? row['symbol'] ?? '');
+              if (!name) continue;
+              const hashIdx = name.lastIndexOf('#');
+              const shortName = hashIdx >= 0 ? name.slice(hashIdx + 1) : name;
+              const fp = String(row['file_path'] ?? row['filePath'] ?? '');
+              const ln = Number(row['line_number'] ?? row['lineNumber'] ?? row['line'] ?? 0);
+              if (calls.some(c => c.callee === shortName && c.filePath === (fp.startsWith('/') ? fp : resolve(workspaceRoot, fp)) && c.lineNumber === ln)) continue;
+              calls.push({
+                callee: shortName,
+                filePath: fp.startsWith('/') ? fp : resolve(workspaceRoot, fp),
+                lineNumber: ln,
+                symbolKind: mapKindToLsp(String(row['kind'] ?? '')),
+              });
+            }
+          }
+          if (calls.length > 0) break;
+        }
+        logInfo('backend', 'outgoing via graph', { rootName: root.name, kind, calleeCount: calls.length, intents });
+      } catch (err) {
+        logWarn('backend', 'graph outgoing query failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
-    const outgoingQueryResult = await intelligenceQuery({
-      workspaceRoot,
-      intent: 'what_api_calls',
-      params: {
-        symbol: root.name,
-        filePath: resolved.point.file,
-        lineNumber: resolved.point.line,
-        maxNodes: 50,
-      },
-      snapshotId: outgoingSnapshotId,
-      mcpUrl,
-    });
-    calls = queryResultToCalleeNodes(outgoingQueryResult);
-    logInfo('backend', 'intelligence-query-what-does-api-call', {
-      rootName: root.name,
-      status: outgoingQueryResult.status,
-      calleeCount: calls.length,
-    });
-  } catch (error) {
-    const text = await callTool(mcpUrl, sessionId, 'lsp_outgoing_calls', {
-      file: resolved.point.file,
-      line: resolved.point.line,
-      character: resolved.point.character,
-    });
-    calls = parseOutgoingCalls(text, workspaceRoot);
-    logWarn('backend', 'intelligence_query outgoing failed; used lsp_outgoing_calls fallback', {
-      rootName: root.name,
-      calleeCount: calls.length,
-      error: error instanceof Error ? error.message : String(error),
-    });
+  } else {
+    // LSP backend: try intelligence_query first, fall back to clangd
+    try {
+      const outgoingSnapshotId = getResolvedSnapshotId(workspaceRoot);
+      if (outgoingSnapshotId <= 0) {
+        throw new Error('no snapshot available');
+      }
+      const outgoingQueryResult = await intelligenceQuery({
+        workspaceRoot,
+        intent: 'what_api_calls',
+        params: { symbol: root.name, filePath: point.file, lineNumber: point.line, maxNodes: 50 },
+        snapshotId: outgoingSnapshotId,
+        mcpUrl,
+      });
+      calls = queryResultToCalleeNodes(outgoingQueryResult);
+      logInfo('backend', 'outgoing callees via graph+lsp', { rootName: root.name, calleeCount: calls.length });
+    } catch {
+      const text = await callTool(mcpUrl, sessionId, 'lsp_outgoing_calls', {
+        file: point.file,
+        line: point.line,
+        character: point.character,
+      });
+      calls = parseOutgoingCalls(text, workspaceRoot);
+      logInfo('backend', 'outgoing callees via lsp fallback', { rootName: root.name, calleeCount: calls.length });
+    }
   }
 
   const payload: BackendRelationPayload = {
@@ -241,9 +390,9 @@ export async function fetchRelationsFromIntelgraph(query: BackendQuery): Promise
     result: {
       [root.name]: {
         symbolKind: root.symbolKind,
-        filePath: resolved.point.file,
-        lineNumber: resolved.point.line,
-        character: resolved.point.character,
+        filePath: point.file,
+        lineNumber: point.line,
+        character: point.character,
         calls,
       },
     },
@@ -642,7 +791,12 @@ export type IntelligenceQueryIntent =
   | 'find_module_symbols'
   | 'find_class_inheritance'
   | 'find_class_subtypes'
-  | 'find_interface_implementors';
+  | 'find_interface_implementors'
+  | 'find_type_consumers'
+  | 'find_type_fields'
+  | 'find_field_readers'
+  | 'find_field_writers'
+  | 'find_type_aggregators';
 
 export type IntelligenceQueryArgs = {
   workspaceRoot: string;
@@ -871,11 +1025,13 @@ export async function ingestWorkspace(args: IngestWorkspaceArgs): Promise<Ingest
 export async function intelligenceQuery(args: IntelligenceQueryArgs): Promise<IntelligenceQueryResult> {
   try {
     const { mcpUrl, sessionId } = await initMcpToolSession(args.workspaceRoot, args.mcpUrl, 'q-relation-tui-intelligence-query');
+    // Pass snapshotId to daemon. 0 = daemon auto-resolves to latest ready snapshot.
+    const effectiveSnapshotId = (typeof args.snapshotId === 'number' && args.snapshotId > 0)
+      ? args.snapshotId
+      : (getResolvedSnapshotId(args.workspaceRoot) || 0);
     const text = await callTool(mcpUrl, sessionId, 'intelligence_query', {
       intent: args.intent,
-      snapshotId: typeof args.snapshotId === 'number' && args.snapshotId > 0
-        ? args.snapshotId
-        : getResolvedSnapshotId(args.workspaceRoot),
+      snapshotId: effectiveSnapshotId,
       ...(args.params.symbol ? { apiName: args.params.symbol } : {}),
       ...(args.params.structName ? { structName: args.params.structName } : {}),
       ...(args.params.logLevel ? { logLevel: args.params.logLevel } : {}),
@@ -1554,17 +1710,19 @@ async function tryAutoStartMcp(workspaceRoot: string, state: any) {
  * initialized" and the TUI to show "unknown_symbol" for TS/Rust files.
  */
 function resolveNodeBin(): string {
-  // 1. Explicit env override
+  // 1. Explicit env override (set by nvim plugin to NVM node path)
   if (process.env.INTELGRAPH_NODE_BIN) return process.env.INTELGRAPH_NODE_BIN;
-  // 2. Try common node paths
-  const candidates = [
-    '/usr/bin/node',
-    '/usr/local/bin/node',
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
+  // 2. The daemon needs Node.js (not Bun) because better-sqlite3 is a
+  //    native addon that Bun doesn't support. If this process is running
+  //    under Bun, we must find the real node binary.
+  //    Check NVM path first, then common system paths, then PATH.
+  const nvmNode = process.env.NVM_BIN ? join(process.env.NVM_BIN, 'node') : null;
+  if (nvmNode && existsSync(nvmNode)) return nvmNode;
+  // 3. process.execPath — only if it's actually node, not bun
+  if (process.execPath && !process.execPath.includes('bun') && existsSync(process.execPath)) {
+    return process.execPath;
   }
-  // 3. PATH lookup
+  // 4. PATH lookup
   return 'node';
 }
 
@@ -1805,6 +1963,23 @@ const HOVER_KIND_MAP: Array<[RegExp, number]> = [
   [/^macro\b/i,         14], // Constant (macros treated as constants)
   [/^constant\b/i,      14], // Constant
 ];
+
+/** Map graph node kind (e.g. "function", "class") to LSP SymbolKind number. */
+function mapKindToLsp(kind: string | undefined): number {
+  switch (kind) {
+    case 'function': return 12;
+    case 'method': return 6;
+    case 'class': return 5;
+    case 'interface': return 11;
+    case 'module': return 2;
+    case 'variable': case 'global_var': return 13;
+    case 'enum': return 10;
+    case 'type': case 'type_alias': return 25;
+    case 'struct': return 23;
+    case 'field': case 'property': return 8;
+    default: return 12;
+  }
+}
 
 function parseHoverForRoot(hoverText: string): { name: string; symbolKind: number } {
   const cleaned = stripIndexSuffix(hoverText);
@@ -2581,6 +2756,71 @@ function rankIncomingCallers(
     if (a.caller !== b.caller) return a.caller.localeCompare(b.caller);
     if (a.filePath !== b.filePath) return a.filePath.localeCompare(b.filePath);
     return a.lineNumber - b.lineNumber;
+  });
+}
+
+export async function queryTypeConsumers(opts: {
+  workspaceRoot: string;
+  symbolName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: opts.workspaceRoot,
+    intent: 'find_type_consumers',
+    params: { symbol: opts.symbolName },
+    mcpUrl: opts.mcpUrl,
+  });
+}
+
+export async function queryTypeFields(opts: {
+  workspaceRoot: string;
+  symbolName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: opts.workspaceRoot,
+    intent: 'find_type_fields',
+    params: { symbol: opts.symbolName },
+    mcpUrl: opts.mcpUrl,
+  });
+}
+
+export async function queryFieldReaders(opts: {
+  workspaceRoot: string;
+  symbolName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: opts.workspaceRoot,
+    intent: 'find_field_readers',
+    params: { symbol: opts.symbolName },
+    mcpUrl: opts.mcpUrl,
+  });
+}
+
+export async function queryFieldWriters(opts: {
+  workspaceRoot: string;
+  symbolName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: opts.workspaceRoot,
+    intent: 'find_field_writers',
+    params: { symbol: opts.symbolName },
+    mcpUrl: opts.mcpUrl,
+  });
+}
+
+export async function queryTypeAggregators(opts: {
+  workspaceRoot: string;
+  symbolName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: opts.workspaceRoot,
+    intent: 'find_type_aggregators',
+    params: { symbol: opts.symbolName },
+    mcpUrl: opts.mcpUrl,
   });
 }
 
