@@ -6,9 +6,9 @@ import { normalizeRelationPayload, mergeFlatItems } from './lib/relation';
 import { logError, logInfo, logWarn } from './lib/logger';
 import type { FlatRelationItem, QueryMode, RelationMode, RelationPayload } from './lib/types';
 import type { SystemStructureGraph } from './lib/system-structure';
-import { queryApiLogs, queryApiStructWrites, ensureSnapshotInitialized } from './lib/intelgraph-client';
-import { queryResultToLogRows, queryResultToStructWriterRows } from './lib/intelligence-query-adapters';
-import type { LogRow, StructWriterRow } from './lib/intelligence-query-adapters';
+import { queryApiLogs, queryApiStructWrites, ensureSnapshotInitialized, queryModuleImports, queryModuleDependents, queryModuleSymbols, queryClassInheritance, queryClassSubtypes, queryInterfaceImplementors, queryTypeConsumers, queryTypeFields, queryFieldReaders, queryFieldWriters, queryTypeAggregators } from './lib/intelgraph-client';
+import { queryResultToLogRows, queryResultToStructWriterRows, queryResultToModuleRows, queryResultToModuleSymbolRows, queryResultToClassRows, queryResultToTypeConsumerRows, queryResultToTypeFieldRows, queryResultToFieldAccessRows, queryResultToTypeAggregatorRows } from './lib/intelligence-query-adapters';
+import type { LogRow, StructWriterRow, ModuleRow, ModuleSymbolRow, ClassRow, TypeConsumerRow, TypeFieldRow, FieldAccessRow, TypeAggregatorRow } from './lib/intelligence-query-adapters';
 
 type RelationState = {
   mode: 'incoming' | 'outgoing' | 'both';
@@ -23,7 +23,7 @@ type RelationState = {
 };
 
 const DEFAULT_PAYLOAD: RelationPayload = {
-  mode: 'incoming',
+  mode: 'both',
   provider: 'none',
   result: null,
 };
@@ -234,7 +234,9 @@ export function App({ workspaceRoot, mcpUrl }: { workspaceRoot?: string; mcpUrl?
     return off;
   }, []);
 
-  const state: RelationState = useMemo(() => normalizeRelationPayload(payload), [payload]);
+  const rawState: RelationState = useMemo(() => normalizeRelationPayload(payload), [payload]);
+  // Always use "both" mode — separate incoming/outgoing views are deprecated.
+  const state: RelationState = useMemo(() => ({ ...rawState, mode: 'both' as const }), [rawState]);
   useEffect(() => {
     activeRootKeyRef.current = makeRootKey(state.rootName, state.rootFilePath, state.rootLineNumber);
   }, [state.rootFilePath, state.rootLineNumber, state.rootName]);
@@ -385,6 +387,72 @@ export function App({ workspaceRoot, mcpUrl }: { workspaceRoot?: string; mcpUrl?
     return queryResultToStructWriterRows(result);
   }, [workspaceRoot, mcpUrl]);
 
+  const requestModuleImports = useCallback(async (moduleName: string): Promise<ModuleRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryModuleImports({ workspaceRoot: workspaceRoot ?? '', moduleName, mcpUrl });
+    return queryResultToModuleRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestModuleDependents = useCallback(async (moduleName: string): Promise<ModuleRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryModuleDependents({ workspaceRoot: workspaceRoot ?? '', moduleName, mcpUrl });
+    return queryResultToModuleRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestModuleSymbols = useCallback(async (moduleName: string): Promise<ModuleSymbolRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryModuleSymbols({ workspaceRoot: workspaceRoot ?? '', moduleName, mcpUrl });
+    return queryResultToModuleSymbolRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestClassInheritance = useCallback(async (className: string): Promise<ClassRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryClassInheritance({ workspaceRoot: workspaceRoot ?? '', className, mcpUrl });
+    return queryResultToClassRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestClassSubtypes = useCallback(async (className: string): Promise<ClassRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryClassSubtypes({ workspaceRoot: workspaceRoot ?? '', className, mcpUrl });
+    return queryResultToClassRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestInterfaceImplementors = useCallback(async (interfaceName: string): Promise<ClassRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryInterfaceImplementors({ workspaceRoot: workspaceRoot ?? '', interfaceName, mcpUrl });
+    return queryResultToClassRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestTypeConsumers = useCallback(async (symbolName: string): Promise<TypeConsumerRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryTypeConsumers({ workspaceRoot: workspaceRoot ?? '', symbolName, mcpUrl });
+    return queryResultToTypeConsumerRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestTypeFields = useCallback(async (symbolName: string): Promise<TypeFieldRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryTypeFields({ workspaceRoot: workspaceRoot ?? '', symbolName, mcpUrl });
+    return queryResultToTypeFieldRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestFieldReaders = useCallback(async (symbolName: string): Promise<FieldAccessRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryFieldReaders({ workspaceRoot: workspaceRoot ?? '', symbolName, mcpUrl });
+    return queryResultToFieldAccessRows(result, 'read');
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestFieldWriters = useCallback(async (symbolName: string): Promise<FieldAccessRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryFieldWriters({ workspaceRoot: workspaceRoot ?? '', symbolName, mcpUrl });
+    return queryResultToFieldAccessRows(result, 'write');
+  }, [workspaceRoot, mcpUrl]);
+
+  const requestTypeAggregators = useCallback(async (symbolName: string): Promise<TypeAggregatorRow[]> => {
+    await ensureSnapshotInitialized({ workspaceRoot: workspaceRoot ?? '', mcpUrl });
+    const result = await queryTypeAggregators({ workspaceRoot: workspaceRoot ?? '', symbolName, mcpUrl });
+    return queryResultToTypeAggregatorRows(result);
+  }, [workspaceRoot, mcpUrl]);
+
   return (
     <RelationWindow
       mode={state.mode}
@@ -400,6 +468,18 @@ export function App({ workspaceRoot, mcpUrl }: { workspaceRoot?: string; mcpUrl?
       requestLogs={requestLogs}
       requestStructWrites={requestStructWrites}
       workspaceRoot={workspaceRoot}
+      initialSymbolKind={payload?.result ? Object.values(payload.result)[0]?.symbolKind : undefined}
+      requestModuleImports={requestModuleImports}
+      requestModuleDependents={requestModuleDependents}
+      requestModuleSymbols={requestModuleSymbols}
+      requestClassInheritance={requestClassInheritance}
+      requestClassSubtypes={requestClassSubtypes}
+      requestInterfaceImplementors={requestInterfaceImplementors}
+      requestTypeConsumers={requestTypeConsumers}
+      requestTypeFields={requestTypeFields}
+      requestFieldReaders={requestFieldReaders}
+      requestFieldWriters={requestFieldWriters}
+      requestTypeAggregators={requestTypeAggregators}
       onOpenLocation={(item) => {
         logInfo('app', 'open_location requested', {
           label: item.label,
