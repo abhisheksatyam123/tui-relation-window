@@ -46,7 +46,7 @@ A release is ready when the following checklist passes:
 | BUG-019 | Bridge (Neovim ↔ TUI) | `query_relations` request occasionally gets no `query_result/query_error`, causing expand timeout and no caller-of-caller | `app.log` 2026-03-19 22:50:01 / 23:09:38 / 23:23:28 show `query_relations requested` followed by timeout; `backend.log` has no matching expand query in those runs | **In Progress** — parser hardened to consume prefixed frames from both stdout/stderr; pending fresh runtime validation |
 | BUG-020 | Neovim session lifecycle | After closing relation tab, subsequent refresh/open can hit `session is not running` due to stale active session bookkeeping | `nvim.log` 2026-03-20 04:08:45 / 04:19:37 / 04:21:15 `refresh: session is not running` | **In Progress** — dead-session pruning + auto-reopen added in `nvim/relation_window.lua`; pending log re-check |
 | BUG-021 | TUI input/query flow | Repeated key handling can flood query requests for the same node before first response, increasing chance of timeouts and inconsistent caller-of-caller expansion | `app.log` 2026-03-19 23:10:24 shows many `query_relations requested` for same parent in the same second | **In Progress** — in-flight dedupe by `parentId` added in `src/App.tsx`; pending log validation |
-| BUG-022 | Query cursor position | Expand requests used `character=1`, causing `prepareCallHierarchy` to miss symbol on declaration lines (no prepare item, no deeper callers) | `clangd-mcp.log` 2026-03-19 23:32:50: `call-hierarchy prepare result` count=0 for `bpf_offload.c:223:0`; direct probe confirms `--character 1` resolves to `type-alias` but `--character 16` resolves `wlan_bpf_offload_vdev_filter_handle` with callers | **In Progress** — TUI now infers character from source line + selected label before sending `query_relations` |
+| BUG-022 | Query cursor position | Expand requests used `character=1`, causing `prepareCallHierarchy` to miss symbol on declaration lines (no prepare item, no deeper callers) | `intelgraph.log` 2026-03-19 23:32:50: `call-hierarchy prepare result` count=0 for `bpf_offload.c:223:0`; direct probe confirms `--character 1` resolves to `type-alias` but `--character 16` resolves `wlan_bpf_offload_vdev_filter_handle` with callers | **In Progress** — TUI now infers character from source line + selected label before sending `query_relations` |
 | BUG-023 | TUI keyboard input | Control-sequence bytes from terminal can be interpreted as normal keys (`q/r/o/h/j/k/l`), causing accidental quit/refresh/open storms and session teardown | `app.log` 2026-03-19 23:36:04 and 23:40:49 show burst of mixed actions in same millisecond (`open_location`, `request_refresh`, `quit_ack`) | **In Progress** — key handler now requires strict `name+sequence+raw` plain-key match, removed ambiguous uppercase sequence shortcuts, and added short action debounce |
 
 ### Low / Polish (non-blocking)
@@ -92,7 +92,7 @@ tail -n 200 logs/nvim.log
 | ID | Component | Description | Priority |
 |----|-----------|-------------|----------|
 | TD-004 | TUI / RelationWindow | Animation tick still triggers re-renders every 120ms even when idle | Medium |
-| TD-005 | Backend | Text-parsing of `lsp_incoming_calls`/`lsp_outgoing_calls` — replace with structured JSON when clangd-mcp supports it | Medium |
+| TD-005 | Backend | Text-parsing of `lsp_incoming_calls`/`lsp_outgoing_calls` — replace with structured JSON when intelgraph supports it | Medium |
 | TD-007 | TUI | Unicode-aware string width for any remaining string operations | Low |
 
 ---

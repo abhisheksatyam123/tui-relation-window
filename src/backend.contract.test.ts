@@ -46,7 +46,7 @@ describe('backend process contract', () => {
     ];
 
     const doctor = await runBackend(['--doctor', '--mode', 'incoming', ...baseArgs], {
-      CLANGD_MCP_URL: mock.url,
+      INTELGRAPH_URL: mock.url,
       TUI_RELATION_MCP_AUTOSTART: '0',
     });
     expect(doctor.doctor).toBe(true);
@@ -54,14 +54,24 @@ describe('backend process contract', () => {
     expect(doctor.mcpUrl).toContain('/mcp');
 
     const incoming = await runBackend(['--mode', 'incoming', ...baseArgs], {
-      CLANGD_MCP_URL: mock.url,
+      INTELGRAPH_URL: mock.url,
       TUI_RELATION_MCP_AUTOSTART: '0',
     });
     expect(incoming.mode).toBe('incoming');
-    expect(incoming.provider).toBe('clangd-mcp');
+    expect(incoming.provider).toBe('intelgraph');
     const root = Object.keys(incoming.result || {})[0];
     expect(root).toBeString();
-    expect((incoming.result?.[root]?.calledBy || []).length).toBeGreaterThan(0);
+    // Mock now returns a real get_callers response — assert on actual callers.
+    const calledBy: unknown[] = incoming.result?.[root]?.calledBy ?? [];
+    expect(Array.isArray(calledBy)).toBe(true);
+    // alpha_caller should appear as a direct caller
+    expect(calledBy.some((c: unknown) => (c as { caller?: string })?.caller === 'alpha_caller')).toBe(true);
+    // setup_handlers should appear as a registrar (interface_registration)
+    const registrar = calledBy.find(
+      (c: unknown) => (c as { caller?: string })?.caller === 'setup_handlers',
+    ) as { connectionKind?: string } | undefined;
+    expect(registrar).toBeDefined();
+    expect(registrar?.connectionKind).toBe('interface_registration');
 
     await mock.close();
   });
@@ -79,11 +89,11 @@ describe('backend process contract', () => {
     ];
 
     const outgoing = await runBackend(['--mode', 'outgoing', ...baseArgs], {
-      CLANGD_MCP_URL: mock.url,
+      INTELGRAPH_URL: mock.url,
       TUI_RELATION_MCP_AUTOSTART: '0',
     });
     expect(outgoing.mode).toBe('outgoing');
-    expect(outgoing.provider).toBe('clangd-mcp');
+    expect(outgoing.provider).toBe('intelgraph');
     const root = Object.keys(outgoing.result || {})[0];
     expect(root).toBeString();
     expect((outgoing.result?.[root]?.calls || []).length).toBeGreaterThan(0);
@@ -107,7 +117,7 @@ describe('backend process contract', () => {
       '--character', '1',
       '--workspace-root', gitDir,   // intentionally wrong
     ], {
-      CLANGD_MCP_URL: mock.url,
+      INTELGRAPH_URL: mock.url,
       TUI_RELATION_MCP_AUTOSTART: '0',
     });
 
@@ -143,4 +153,3 @@ async function runBackend(args: string[], extraEnv: Record<string, string>) {
 
   return JSON.parse(stdout.trim());
 }
-

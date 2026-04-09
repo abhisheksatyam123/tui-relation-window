@@ -1,8 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
-import { resolve, dirname, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { resolve, dirname } from 'node:path';
 import type { BackendRelationPayload } from './backend-types';
 import { logInfo, logWarn, logError } from './logger';
 
@@ -22,48 +21,14 @@ export type CachedPayload = {
 };
 
 const SCHEMA_VERSION = 1;
-const CACHE_DIR_BASE = resolve(homedir(), '.local/share/clangd-mcp');
-
-/**
- * Derive a human-readable workspace slug from the workspace root path.
- * For WLAN.CNG.* workspaces, extracts "CNG" as the slug.
- * For other workspaces, uses first 16 chars of SHA-256 hash.
- */
-function deriveWorkspaceSlug(workspaceRoot: string): string {
-  const normalized = resolve(workspaceRoot);
-  const baseName = basename(normalized);
-  
-  // Pattern: WLAN.CNG.* → slug = "CNG"
-  const cngMatch = baseName.match(/^WLAN\.CNG\./i);
-  if (cngMatch) {
-    return 'CNG';
-  }
-  
-  // Pattern: WLAN.<PROJECT>.* → slug = "<PROJECT>"
-  const wlanMatch = baseName.match(/^WLAN\.([A-Z0-9_-]+)\./i);
-  if (wlanMatch) {
-    return wlanMatch[1].toUpperCase();
-  }
-  
-  // Fallback: use first 16 chars of SHA-256 hash
-  const hash = createHash('sha256').update(normalized).digest('hex');
-  return hash.slice(0, 16);
-}
 
 /**
  * Get the cache database path for a workspace.
- * Format: ~/.local/share/clangd-mcp/<workspace-slug>/relation-cache.db
+ * Format: <workspaceRoot>/relation-cache.db
  */
 export function getCacheDbPath(workspaceRoot: string): string {
-  const slug = deriveWorkspaceSlug(workspaceRoot);
-  const cacheDir = resolve(CACHE_DIR_BASE, slug);
-  
-  // Ensure directory exists
-  if (!existsSync(cacheDir)) {
-    mkdirSync(cacheDir, { recursive: true });
-  }
-  
-  return resolve(cacheDir, 'relation-cache.db');
+  const root = resolve(workspaceRoot);
+  return resolve(root, 'relation-cache.db');
 }
 
 /**
@@ -71,6 +36,10 @@ export function getCacheDbPath(workspaceRoot: string): string {
  */
 export function initCache(workspaceRoot: string): Database {
   const dbPath = getCacheDbPath(workspaceRoot);
+  const root = resolve(workspaceRoot);
+  if (!existsSync(root)) {
+    mkdirSync(root, { recursive: true });
+  }
   const db = new Database(dbPath);
   
   // Create schema

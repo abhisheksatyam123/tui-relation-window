@@ -41,7 +41,7 @@ function sleep(ms: number) {
 
 const REAL_PAYLOAD = {
   mode: 'outgoing',
-  provider: 'clangd-mcp',
+  provider: 'intelgraph',
   result: {
     compute: {
       symbolKind: 12,
@@ -219,7 +219,7 @@ async function main() {
       parentId: 'root:compute|add:test/cpp_fixture/test_callhierarchy.cpp:9|0',
       result: {
         mode: 'outgoing',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           add: {
             symbolKind: 12,

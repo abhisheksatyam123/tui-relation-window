@@ -34,6 +34,7 @@ export type CallerNode = {
   lineNumber: number;
   symbolKind?: number;
   connectionKind?: SystemConnectionKind;
+  viaRegistrationApi?: string;
 };
 
 export type CalleeNode = {

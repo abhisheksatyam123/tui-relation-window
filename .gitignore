@@ -4,11 +4,29 @@ node_modules/
 # Runtime logs and temp outputs
 logs/
 *.log
+intelgraph.log
+intelgraph-bridge.log
 clangd-mcp.log
 clangd-mcp-bridge.log
+1
+
+# Local notes vault
+/doc/
+/doc
 
 # Local bridge/session state
+.intelgraph-state.json
 .clangd-mcp-state.json
+opencode.json
+.intelgraph.json
+.clangd-mcp.json
+relation-cache.db
+
+# Local scratch/debug files
+debug-test.ts
+test-incoming-raw.ts
+test-ingest.ts
+E2E-VERIFICATION-FINDINGS.md
 
 # Build artifacts
 coverage/
@@ -21,3 +39,6 @@ build/
 
 # Tool cache
 test/cpp_fixture/.cache/
+
+# Local symlinked logs
+/logs

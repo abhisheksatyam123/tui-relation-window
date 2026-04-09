@@ -94,9 +94,10 @@ def restart_mcp(
                 pass
 
     if hard_reset:
-        state_path = workspace / ".clangd-mcp-state.json"
-        if state_path.exists():
-            state_path.unlink()
+        for name in (".intelgraph-state.json", ".clangd-mcp-state.json"):
+            state_path = workspace / name
+            if state_path.exists():
+                state_path.unlink()
 
     port = int(state.get("httpPort", 40141))
     clangd_bin = state.get("clangdBin", "/usr/local/bin/clangd-20")
@@ -118,8 +119,8 @@ def restart_mcp(
         ",".join(clangd_args),
     ]
 
-    out = Path("/tmp/wlan-clangd-mcp-restart.out")
-    err = Path("/tmp/wlan-clangd-mcp-restart.err")
+    out = Path("/tmp/wlan-intelgraph-restart.out")
+    err = Path("/tmp/wlan-intelgraph-restart.err")
     with (
         out.open("w", encoding="utf-8") as out_f,
         err.open("w", encoding="utf-8") as err_f,
@@ -131,7 +132,7 @@ def restart_mcp(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Remove -mduplex from compile_commands and restart clangd-mcp daemon"
+        description="Remove -mduplex from compile_commands and restart intelgraph daemon"
     )
     parser.add_argument(
         "--workspace",
@@ -140,8 +141,8 @@ def main():
     )
     parser.add_argument(
         "--mcp-project",
-        default="/local/mnt/workspace/qprojects/clangd-mcp",
-        help="Path to clangd-mcp project",
+        default="/local/mnt/workspace/qprojects/intelgraph",
+        help="Path to intelgraph project",
     )
     parser.add_argument(
         "--bun", default="/local/mnt/workspace/.bun/bin/bun", help="Bun binary path"
@@ -160,7 +161,10 @@ def main():
 
     workspace = Path(args.workspace).resolve()
     db = workspace / "compile_commands.json"
-    state_path = workspace / ".clangd-mcp-state.json"
+    # Prefer the new .intelgraph-state.json, fall back to the legacy name.
+    state_path = workspace / ".intelgraph-state.json"
+    if not state_path.exists():
+        state_path = workspace / ".clangd-mcp-state.json"
 
     if not db.exists():
         print(f"ERROR: Missing {db}")
@@ -181,9 +185,9 @@ def main():
     port = restart_mcp(
         workspace, state, Path(args.mcp_project), args.bun, args.hard_reset
     )
-    print(f"Restarted clangd-mcp daemon on port {port}")
+    print(f"Restarted intelgraph daemon on port {port}")
     print(
-        "Check restart logs: /tmp/wlan-clangd-mcp-restart.out and /tmp/wlan-clangd-mcp-restart.err"
+        "Check restart logs: /tmp/wlan-intelgraph-restart.out and /tmp/wlan-intelgraph-restart.err"
     )
     return 0
 

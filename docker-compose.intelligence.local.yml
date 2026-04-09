@@ -1,0 +1,13 @@
+services:
+  neo4j:
+    image: neo4j:5
+    container_name: ${INTEL_STACK_NAME:-intelgraph-local}-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${INTEL_NEO4J_USER:-neo4j}/${INTEL_NEO4J_PASSWORD:-neo4j1234}
+    ports:
+      - "${INTEL_NEO4J_HTTP_PORT:-57474}:7474"
+      - "${INTEL_NEO4J_BOLT_PORT:-57687}:7687"
+    volumes:
+      - ${INTELLIGENCE_NEO4J_DATA_DIR:-${WLAN_WORKSPACE_ROOT:-.}/.intelligence-data/neo4j/data}:/data
+      - ${INTELLIGENCE_NEO4J_LOGS_DIR:-${WLAN_WORKSPACE_ROOT:-.}/.intelligence-data/neo4j/logs}:/logs

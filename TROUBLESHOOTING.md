@@ -194,9 +194,9 @@ tail -f ~/.local/share/tui-relation-window/logs/backend.log
    bun run test:connectivity
    ```
 
-4. **Check clangd-mcp logs**:
+4. **Check intelgraph logs**:
    ```bash
-   tail -50 /path/to/your/workspace/clangd-mcp.log
+   tail -50 /path/to/your/workspace/intelgraph.log
    ```
 
 ---

@@ -100,7 +100,7 @@ function validateRelationResponse(
     fail(`${mode} mode mismatch: got '${String(payload.mode)}'`);
   }
 
-  if (payload.provider !== 'clangd-mcp') {
+  if (payload.provider !== 'intelgraph') {
     fail(`${mode} provider mismatch: got '${String(payload.provider)}'`);
   }
 

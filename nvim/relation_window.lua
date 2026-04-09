@@ -271,6 +271,41 @@ local function send_message(session, message)
   return true
 end
 
+local function stop_session_job(session, reason)
+  if not session or not session.job_id then
+    return
+  end
+
+  local job_id = session.job_id
+  session.job_id = nil
+  log_debug("stopping session job", { id = session.id, job_id = job_id, reason = reason })
+
+  local ch = vim.fn.jobgetchannel(job_id)
+  if type(ch) == "number" and ch > 0 then
+    pcall(vim.fn.chanclose, ch, "stdin")
+  end
+
+  pcall(vim.fn.jobstop, job_id)
+end
+
+local function shutdown_session(sid, opts)
+  if not sid then
+    return
+  end
+
+  local session = M.state.sessions[sid]
+  if not session then
+    return
+  end
+
+  opts = opts or {}
+  if opts.send_quit then
+    send_message(session, { type = "quit" })
+  end
+  stop_session_job(session, opts.reason or "shutdown")
+  remove_session(sid)
+end
+
 local function resolve_source_context(session)
   local win = session.source_win
   if not is_source_window(win) then
@@ -349,6 +384,8 @@ local function find_workspace_root_for_file(file_path)
 
   local dir = vim.fn.fnamemodify(file_path, ":p:h")
   local markers = {
+    ".intelgraph-state.json",
+    ".intelgraph.json",
     ".clangd-mcp-state.json",
     ".clangd-mcp.json",
     ".git",
@@ -362,8 +399,8 @@ local function find_workspace_root_for_file(file_path)
 
   if found and found ~= "" then
     -- vim.fs.find returns the marker path itself.
-    -- For file markers (.clangd-mcp-state.json, .clangd-mcp.json) the parent
-    -- directory is the workspace root.
+    -- For file markers (.intelgraph-state.json, .intelgraph.json, and the
+    -- legacy .clangd-mcp* names) the parent directory is the workspace root.
     -- For directory markers (.git) the marker IS a directory, so its parent
     -- is the workspace root — NOT the directory itself.
     -- fnamemodify(path, ":p:h") on a directory returns the directory itself
@@ -373,7 +410,7 @@ local function find_workspace_root_for_file(file_path)
       -- found is e.g. /workspace/.git — workspace root is its parent
       return vim.fn.fnamemodify(found, ":p:h:h")
     else
-      -- found is e.g. /workspace/.clangd-mcp-state.json — parent is root
+      -- found is e.g. /workspace/.intelgraph-state.json — parent is root
       return vim.fn.fnamemodify(found, ":p:h")
     end
   end
@@ -611,7 +648,7 @@ local function load_backend_payload(session)
     if not root_name then
       return {
         mode = "both",
-        provider = "clangd-mcp",
+        provider = "intelgraph",
         result = {},
       }
     end
@@ -627,7 +664,7 @@ local function load_backend_payload(session)
 
     return {
       mode = "both",
-      provider = (incoming and incoming.provider) or (outgoing and outgoing.provider) or "clangd-mcp",
+      provider = (incoming and incoming.provider) or (outgoing and outgoing.provider) or "intelgraph",
       result = {
         [root_name] = merged,
       },
@@ -1185,15 +1222,13 @@ function M.close(id)
     return
   end
 
-  send_message(session, { type = "quit" })
+   shutdown_session(sid, { send_quit = true, reason = "close" })
 
   if is_valid_win(session.win) then
     vim.api.nvim_win_close(session.win, true)
   elseif is_valid_buf(session.buf) then
     vim.api.nvim_buf_delete(session.buf, { force = true })
   end
-
-  remove_session(sid)
 end
 
 function M.close_all()
@@ -1497,7 +1532,7 @@ vim.api.nvim_create_autocmd({ "BufWipeout", "TermClose" }, {
     local buf = args.buf
     for sid, session in pairs(M.state.sessions) do
       if session.buf == buf then
-        remove_session(sid)
+        shutdown_session(sid, { reason = args.event or "autocmd" })
         break
       end
     end

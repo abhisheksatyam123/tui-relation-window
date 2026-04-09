@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { queryResultToLogRows, queryResultToStructWriterRows } from './intelligence-query-adapters';
-import type { IntelligenceQueryResult } from './clangd-mcp-client';
+import type { IntelligenceQueryResult } from './intelgraph-client';
 
 function makeResult(
   status: IntelligenceQueryResult['status'],

@@ -18,11 +18,17 @@ async function main() {
   hideCursor();
   startBridge();
 
+  const workspaceRoot =
+    process.env['WORKSPACE_ROOT'] ||
+    process.env['INTELGRAPH_WORKSPACE_ROOT'] ||
+    process.env['CLANGD_MCP_WORKSPACE_ROOT'];
+  const mcpUrl = process.env['INTELGRAPH_URL'] || process.env['CLANGD_MCP_URL'];
+
   const renderer = await createCliRenderer({
     exitOnCtrlC: true,
   });
 
-  createRoot(renderer).render(<App />);
+  createRoot(renderer).render(<App workspaceRoot={workspaceRoot} mcpUrl={mcpUrl} />);
   logInfo('app', 'tui render started');
 }
 

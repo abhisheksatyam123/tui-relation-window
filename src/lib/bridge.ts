@@ -12,6 +12,7 @@ const pending: BridgeIncomingMessage[] = [];
 let inboxOffset = 0;
 let inboxBuffer = '';
 let inboxTimer: ReturnType<typeof setInterval> | null = null;
+let stdinDataHandler: ((chunk: string) => void) | null = null;
 
 export function startBridge() {
   logInfo('app', 'bridge started', { mode: inboxPath ? 'inbox' : 'stdin', inboxPath: inboxPath || undefined });
@@ -25,7 +26,7 @@ export function startBridge() {
   process.stdin.resume();
 
   let buffer = '';
-  process.stdin.on('data', (chunk: string) => {
+  stdinDataHandler = (chunk: string) => {
     buffer += chunk;
 
     let split = buffer.indexOf('\n');
@@ -39,7 +40,8 @@ export function startBridge() {
 
       split = buffer.indexOf('\n');
     }
-  });
+  };
+  process.stdin.on('data', stdinDataHandler);
 }
 
 export function onBridgeMessage(listener: (message: BridgeIncomingMessage) => void) {
@@ -221,4 +223,20 @@ function extractJsonCandidate(input: string): string | null {
 export const __test = {
   stripAnsiNoise,
   extractJsonCandidate,
+  processInboxChunk,
+  /** Reset module-level state between unit tests. */
+  resetForTest() {
+    listeners.clear();
+    pending.splice(0, pending.length);
+    inboxOffset = 0;
+    inboxBuffer = '';
+    if (inboxTimer) {
+      clearInterval(inboxTimer);
+      inboxTimer = null;
+    }
+    if (stdinDataHandler) {
+      process.stdin.removeListener('data', stdinDataHandler);
+      stdinDataHandler = null;
+    }
+  },
 };

@@ -1,7 +1,7 @@
 /**
  * ts-structural-intents.test.ts
  *
- * Verifies that the new TS-shaped query helpers in clangd-mcp-client.ts
+ * Verifies that the new TS-shaped query helpers in intelgraph-client.ts
  * are wired correctly:
  *   - The IntelligenceQueryIntent union accepts the 6 new structural
  *     intent names (find_module_imports etc.)
@@ -12,7 +12,7 @@
  *
  * These tests deliberately don't hit a live MCP server — they only
  * verify the type and shape of the wiring. End-to-end queries against
- * a populated SQLite snapshot are covered by the clangd-mcp test suite
+ * a populated SQLite snapshot are covered by the intelgraph test suite
  * in test/integration/ts-core-real-workspaces.test.ts.
  */
 
@@ -26,7 +26,7 @@ import {
   queryModuleImports,
   queryModuleSymbols,
   type IntelligenceQueryIntent,
-} from './clangd-mcp-client';
+} from './intelgraph-client';
 
 describe('ts-structural-intents — IntelligenceQueryIntent union', () => {
   it('accepts the 6 new structural intent names', () => {
@@ -236,7 +236,7 @@ describe('ts-structural-intents — query helper signatures', () => {
 });
 
 describe('ts-structural-intents — D28 / D36–D44 query intent contract', () => {
-  // The intents below were added to clangd-mcp's QueryIntent union
+  // The intents below were added to intelgraph's QueryIntent union
   // after the original D1–D21 batch. They're not yet typed into
   // tui-relation-window's IntelligenceQueryIntent (the user's edits
   // there are still in-progress), but they work via the MCP boundary

@@ -10,6 +10,8 @@ export type NodeInstance = {
   lineNumber: number;
   symbolKind?: number;
   edgeKindFromParent?: EdgeKind;
+  /** For interface_registration nodes: the registration API that wired this callback */
+  viaRegistrationApi?: string;
 };
 
 export type DirectionGraph = {
@@ -91,6 +93,8 @@ export function addChildrenForDirection(
         filePath: original?.filePath ?? '',
         lineNumber: original?.lineNumber ?? 1,
         symbolKind: original?.symbolKind,
+        edgeKindFromParent: original?.edgeKindFromParent,
+        viaRegistrationApi: original?.viaRegistrationApi,
       };
     }
     nextParentByNode[anchorId] = base.rootId;
@@ -136,6 +140,7 @@ export function addChildrenForDirection(
       lineNumber: item.lineNumber,
       symbolKind: item.symbolKind,
       edgeKindFromParent: item.connectionKind ?? 'api_call',
+      viaRegistrationApi: item.viaRegistrationApi,
     };
     appendedIds.push(nodeId);
     nextParentByNode[nodeId] = effectiveParentId;

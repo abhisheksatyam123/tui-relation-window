@@ -2,13 +2,14 @@
  * Runtime caller type system tests.
  *
  * Tests that the frontend parser correctly handles all runtime caller connection kinds,
- * section headers, trigger metadata, and mediated-paths endpoint/stage mappings.
+ * trigger metadata, and mediated-paths endpoint/stage mappings.
  *
  * Unlike the integration tests in indirect-caller-wlan-coverage.test.ts (which exercise
- * the full fetchRelationsFromClangdMcp → mock MCP → parser pipeline), these tests
- * directly exercise the type system and parser internals.
+ * the full fetchRelationsFromIntelgraph → mock MCP → parser pipeline), these tests
+ * directly exercise the type system and exported mapping functions.
  */
 import { describe, expect, test } from 'bun:test';
+import { edgeKindToConnectionKind } from './intelgraph-client';
 import type { BackendConnectionKind, BackendSystemNodeKind } from './backend-types';
 import type { SystemConnectionKind, SystemNodeKind } from './types';
 
@@ -100,82 +101,50 @@ describe('Runtime caller types — completeness', () => {
   });
 });
 
-// ─── Section header → connectionKind mapping ──────────────────────────────────
+// ─── edgeKindToConnectionKind — exported function tests ──────────────────────
 
 /**
- * These tests verify that the section header patterns in parseIndirectCallersFromText
- * correctly map to the expected connectionKind. We test the regex patterns directly
- * rather than through the full parser to isolate the mapping logic.
+ * These tests verify that edgeKindToConnectionKind correctly maps backend edge kinds
+ * to frontend connection kinds. Tests call the actual exported function, not copied regex patterns.
  */
-describe('Runtime caller section headers → connectionKind mapping', () => {
-  // Copied from clangd-mcp-client.ts parseIndirectCallersFromText section header block
-  const sectionMappings: Array<{ header: string; expectedKind: BackendConnectionKind }> = [
-    { header: 'Direct callers (5)', expectedKind: 'api_call' },
-    { header: 'Dispatch-table registrations (3)', expectedKind: 'interface_registration' },
-    { header: 'Registration-call registrations (7)', expectedKind: 'interface_registration' },
-    { header: 'Struct registrations (2)', expectedKind: 'interface_registration' },
-    { header: 'Signal-based registrations (4)', expectedKind: 'ring_signal' },
-    { header: 'WMI Dispatch registrations (11)', expectedKind: 'interface_registration' },
-    { header: 'Hardware interrupt registrations (4)', expectedKind: 'hw_interrupt' },
-    { header: 'Ring signal registrations (2)', expectedKind: 'ring_signal' },
-    { header: 'Event registrations (5)', expectedKind: 'event' },
-    { header: 'Thread signal registrations (3)', expectedKind: 'ring_signal' },
-    // New section headers:
-    { header: 'Timer callback registrations (7)', expectedKind: 'timer_callback' },
-    { header: 'Deferred work registrations (5)', expectedKind: 'deferred_work' },
-    { header: 'DebugFS registrations (2)', expectedKind: 'debugfs_op' },
-    { header: 'IOCTL dispatch registrations (4)', expectedKind: 'ioctl_dispatch' },
-    { header: 'Ring completion registrations (4)', expectedKind: 'ring_completion' },
-    { header: 'Work queue registrations (3)', expectedKind: 'deferred_work' },
-  ];
-
-  // Regex patterns matching each section header (must match the actual patterns in clangd-mcp-client.ts)
-  const headerPatterns: Array<{ pattern: RegExp; kind: BackendConnectionKind }> = [
-    { pattern: /^Direct callers\s*\(/i, kind: 'api_call' },
-    { pattern: /^Dispatch-table registrations\s*\(/i, kind: 'interface_registration' },
-    { pattern: /^Registration-call registrations\s*\(/i, kind: 'interface_registration' },
-    { pattern: /^Struct registrations\s*\(/i, kind: 'interface_registration' },
-    { pattern: /^Signal-based registrations\s*\(/i, kind: 'ring_signal' },
-    { pattern: /^WMI Dispatch registrations\s*\(/i, kind: 'interface_registration' },
-    { pattern: /^Hardware interrupt registrations\s*\(/i, kind: 'hw_interrupt' },
-    { pattern: /^Ring signal registrations\s*\(/i, kind: 'ring_signal' },
-    { pattern: /^Event registrations\s*\(/i, kind: 'event' },
-    { pattern: /^Thread signal registrations\s*\(/i, kind: 'ring_signal' },
-    { pattern: /^Timer callback registrations\s*\(/i, kind: 'timer_callback' },
-    { pattern: /^Deferred work registrations\s*\(/i, kind: 'deferred_work' },
-    { pattern: /^DebugFS registrations\s*\(/i, kind: 'debugfs_op' },
-    { pattern: /^IOCTL dispatch registrations\s*\(/i, kind: 'ioctl_dispatch' },
-    { pattern: /^Ring completion registrations\s*\(/i, kind: 'ring_completion' },
-    { pattern: /^Work queue registrations\s*\(/i, kind: 'deferred_work' },
-  ];
-
-  for (const mapping of sectionMappings) {
-    test(`"${mapping.header}" → ${mapping.expectedKind}`, () => {
-      const match = headerPatterns.find((hp) => hp.pattern.test(mapping.header));
-      expect(match, `No pattern matches header: "${mapping.header}"`).toBeDefined();
-      expect(match!.kind).toBe(mapping.expectedKind);
-    });
-  }
-
-  test('no section header matches more than one pattern', () => {
-    for (const mapping of sectionMappings) {
-      const matches = headerPatterns.filter((hp) => hp.pattern.test(mapping.header));
-      expect(matches.length, `Header "${mapping.header}" matches ${matches.length} patterns`).toBe(1);
-    }
+describe('edgeKindToConnectionKind — backend edge kind mapping', () => {
+  // Backend EdgeKind semantic values
+  test.each([
+    ['calls', 'api_call'],
+    ['indirect_calls', 'interface_registration'],
+    ['registers_callback', 'interface_registration'],
+    ['dispatches_to', 'interface_registration'],
+    ['reads_field', 'custom'],
+    ['writes_field', 'custom'],
+    ['uses_macro', 'custom'],
+    ['logs_event', 'event'],
+    ['operates_on_struct', 'custom'],
+  ] as const)('backend kind "%s" → connectionKind "%s"', (kind, expected) => {
+    expect(edgeKindToConnectionKind(kind)).toBe(expected);
   });
 
-  test('non-section-header lines do not match any pattern', () => {
-    const nonHeaders = [
-      '  <- [Function] wlan_timer_start  at utils/src/wlan_timer.c:205:9',
-      '     via: cmnos_timer_start',
-      '     trigger-type: timer_callback',
-      '',
-      'Callers of _wlan_periodic_timer_expiry  (1 total: 1 timer-call)',
-    ];
-    for (const line of nonHeaders) {
-      const matches = headerPatterns.filter((hp) => hp.pattern.test(line));
-      expect(matches.length, `Non-header line matches pattern: "${line}"`).toBe(0);
-    }
+  // BackendConnectionKind passthrough values (already in UI form)
+  test.each([
+    'api_call',
+    'interface_registration',
+    'sw_thread_comm',
+    'hw_interrupt',
+    'hw_ring',
+    'ring_signal',
+    'event',
+    'timer_callback',
+    'deferred_work',
+    'debugfs_op',
+    'ioctl_dispatch',
+    'ring_completion',
+    'custom',
+  ] as const)('passthrough kind "%s" → same value', (kind) => {
+    expect(edgeKindToConnectionKind(kind)).toBe(kind);
+  });
+
+  test('unknown edge kind falls back to custom', () => {
+    expect(edgeKindToConnectionKind('some_unknown_kind')).toBe('custom');
+    expect(edgeKindToConnectionKind('')).toBe('custom');
   });
 });
 

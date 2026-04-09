@@ -2,7 +2,7 @@
 /**
  * test-mcp-connectivity.ts
  *
- * Standalone connectivity test for the clangd-mcp server.
+ * Standalone connectivity test for the intelgraph server.
  * Tests the full pipeline: state file discovery → HTTP connect → doctor →
  * incoming calls → outgoing calls.
  *
@@ -45,7 +45,7 @@ async function runBackend(args: string[], extraEnv: Record<string, string> = {})
     TUI_RELATION_MCP_AUTOSTART: '0',
     ...extraEnv,
   };
-  if (MCP_URL) env.CLANGD_MCP_URL = MCP_URL;
+  if (MCP_URL) env.INTELGRAPH_URL = MCP_URL;
 
   const proc = Bun.spawn({
     cmd: [process.execPath, 'src/backend.ts', ...args],
@@ -85,7 +85,7 @@ async function testStateFileDiscovery() {
   const { readFileSync } = await import('node:fs');
   const { join } = await import('node:path');
 
-  const statePath = join(WORKSPACE, '.clangd-mcp-state.json');
+  const statePath = join(WORKSPACE, '.intelgraph-state.json');
   let state: Record<string, unknown>;
   try {
     state = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -194,7 +194,7 @@ async function testIncomingCalls() {
   ]) as Record<string, unknown>;
 
   if (result.mode !== 'incoming') fail(`mode mismatch: got "${result.mode}"`);
-  if (result.provider !== 'clangd-mcp') fail(`provider mismatch: got "${result.provider}"`);
+  if (result.provider !== 'intelgraph') fail(`provider mismatch: got "${result.provider}"`);
 
   const roots = Object.keys((result.result as Record<string, unknown>) ?? {});
   if (roots.length === 0) fail('result has no root symbols');
@@ -204,7 +204,7 @@ async function testIncomingCalls() {
   const calledBy = rootNode?.calledBy ?? [];
 
   pass(`mode = incoming`);
-  pass(`provider = clangd-mcp`);
+  pass(`provider = intelgraph`);
   pass(`root symbol = "${root}"`);
   pass(`calledBy entries = ${calledBy.length}`);
 
@@ -229,7 +229,7 @@ async function testOutgoingCalls() {
   ]) as Record<string, unknown>;
 
   if (result.mode !== 'outgoing') fail(`mode mismatch: got "${result.mode}"`);
-  if (result.provider !== 'clangd-mcp') fail(`provider mismatch: got "${result.provider}"`);
+  if (result.provider !== 'intelgraph') fail(`provider mismatch: got "${result.provider}"`);
 
   const roots = Object.keys((result.result as Record<string, unknown>) ?? {});
   if (roots.length === 0) fail('result has no root symbols');
@@ -239,7 +239,7 @@ async function testOutgoingCalls() {
   const calls = rootNode?.calls ?? [];
 
   pass(`mode = outgoing`);
-  pass(`provider = clangd-mcp`);
+  pass(`provider = intelgraph`);
   pass(`root symbol = "${root}"`);
   pass(`calls entries = ${calls.length}`);
 
@@ -258,7 +258,7 @@ async function testOutgoingCalls() {
 
 async function main() {
   console.log('╔══════════════════════════════════════════════════════════════╗');
-  console.log('║       q-relation-tui  ·  clangd-mcp connectivity test       ║');
+  console.log('║       q-relation-tui  ·  intelgraph connectivity test       ║');
   console.log('╚══════════════════════════════════════════════════════════════╝');
   console.log(`\n  workspace : ${WORKSPACE}`);
   console.log(`  file      : ${CPP_FILE}`);
@@ -272,7 +272,7 @@ async function main() {
   await testOutgoingCalls();
 
   console.log('\n══════════════════════════════════════════════════════════════════');
-  console.log('  ALL TESTS PASSED — clangd-mcp connection is healthy');
+  console.log('  ALL TESTS PASSED — intelgraph connection is healthy');
   console.log('══════════════════════════════════════════════════════════════════\n');
 }
 

@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import { doctorClangdMcp, fetchRelationsFromClangdMcp, normaliseWorkspaceRoot } from './lib/clangd-mcp-client';
+import { doctorIntelgraph, fetchRelationsFromIntelgraph, normaliseWorkspaceRoot } from './lib/intelgraph-client';
 import { clearWorkspaceCache, getCacheStats } from './lib/relation-cache';
 import type { BackendMode, BackendQuery } from './lib/backend-types';
 import { getLogDir, logError, logInfo } from './lib/logger';
@@ -101,13 +101,13 @@ async function main() {
   const query = parseArgs(Bun.argv.slice(2));
   logInfo('backend', 'backend query start', { logDir: getLogDir(), query });
   if (doctorMode) {
-    const diag = await doctorClangdMcp(query);
+    const diag = await doctorIntelgraph(query);
     logInfo('backend', 'doctor success', diag);
     process.stdout.write(`${JSON.stringify({ doctor: true, ...diag })}\n`);
     return;
   }
 
-  const payload = await fetchRelationsFromClangdMcp(query);
+  const payload = await fetchRelationsFromIntelgraph(query);
   logInfo('backend', 'backend query success', {
     mode: payload.mode,
     provider: payload.provider,

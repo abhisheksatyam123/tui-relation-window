@@ -10,8 +10,8 @@
  * Pass-after:  all 3 scenarios covered and passing.
  */
 import { describe, expect, test } from 'bun:test';
-import { queryResultToCallerNodes, queryResultToRuntimeCallerNodes } from './clangd-mcp-client';
-import type { IntelligenceQueryResult } from './clangd-mcp-client';
+import { queryResultToCallerNodes, queryResultToRuntimeCallerNodes } from './intelgraph-client';
+import type { IntelligenceQueryResult } from './intelgraph-client';
 
 // Helper to build a minimal IntelligenceQueryResult
 function makeResult(

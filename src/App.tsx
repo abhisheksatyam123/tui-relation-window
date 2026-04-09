@@ -2,11 +2,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { readFileSync } from 'node:fs';
 import { RelationWindow } from './components/RelationWindow';
 import { onBridgeMessage, sendBridgeMessage } from './lib/bridge';
-import { normalizeRelationPayload } from './lib/relation';
+import { normalizeRelationPayload, mergeFlatItems } from './lib/relation';
 import { logError, logInfo, logWarn } from './lib/logger';
 import type { FlatRelationItem, QueryMode, RelationMode, RelationPayload } from './lib/types';
 import type { SystemStructureGraph } from './lib/system-structure';
-import { queryApiLogs, queryApiStructWrites, ensureSnapshotInitialized } from './lib/clangd-mcp-client';
+import { queryApiLogs, queryApiStructWrites, ensureSnapshotInitialized } from './lib/intelgraph-client';
 import { queryResultToLogRows, queryResultToStructWriterRows } from './lib/intelligence-query-adapters';
 import type { LogRow, StructWriterRow } from './lib/intelligence-query-adapters';
 
@@ -35,19 +35,6 @@ type CustomByRoot = Record<string, { incoming: FlatRelationItem[]; outgoing: Fla
 
 function makeRootKey(rootName: string, rootFilePath?: string, rootLineNumber?: number): string {
   return `${rootName}|${rootFilePath ?? ''}|${rootLineNumber ?? 0}`;
-}
-
-function mergeFlatItems(base: FlatRelationItem[], extra: FlatRelationItem[]): FlatRelationItem[] {
-  if (extra.length === 0) return base;
-  const seen = new Set(base.map((item) => `${item.label}|${item.filePath}|${item.lineNumber}|${item.relationType}`));
-  const out = [...base];
-  for (const item of extra) {
-    const key = `${item.label}|${item.filePath}|${item.lineNumber}|${item.relationType}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(item);
-  }
-  return out;
 }
 
 function inferSourcePoint(filePath: string, lineNumber: number, label: string): { lineNumber: number; character: number } {
@@ -89,6 +76,13 @@ function inferSourcePoint(filePath: string, lineNumber: number, label: string): 
 
   return { lineNumber, character: 1 };
 }
+
+/** Exported for unit testing only — not part of the public API. */
+export const __test = {
+  mergeFlatItems,
+  inferSourcePoint,
+  makeRootKey,
+};
 
 export function App({ workspaceRoot, mcpUrl }: { workspaceRoot?: string; mcpUrl?: string } = {}) {
   const [payload, setPayload] = useState<RelationPayload>(DEFAULT_PAYLOAD);
@@ -262,8 +256,9 @@ export function App({ workspaceRoot, mcpUrl }: { workspaceRoot?: string; mcpUrl?
   const mergedItems = useMemo(() => {
     if (state.mode === 'incoming') return mergedIncomingItems;
     if (state.mode === 'outgoing') return mergedOutgoingItems;
-    return state.items;
-  }, [mergedIncomingItems, mergedOutgoingItems, state.items, state.mode]);
+    // 'both' mode: combine merged incoming and outgoing so custom relations are included
+    return mergeFlatItems(mergedIncomingItems, mergedOutgoingItems);
+  }, [mergedIncomingItems, mergedOutgoingItems, state.mode]);
 
   const requestExpand = useCallback(
     (node: { id: string; label: string; filePath: string; lineNumber: number; mode: QueryMode }) => {

@@ -1,6 +1,6 @@
 // test_callhierarchy.cpp
 // A minimal C++ file with a clear call hierarchy for testing
-// the clangd-mcp incoming/outgoing call queries.
+// the intelgraph incoming/outgoing call queries.
 
 #include <cstdio>
 

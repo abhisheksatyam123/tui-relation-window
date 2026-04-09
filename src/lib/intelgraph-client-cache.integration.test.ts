@@ -2,7 +2,7 @@ import { describe, expect, test, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { fetchRelationsFromClangdMcp } from './clangd-mcp-client';
+import { fetchRelationsFromIntelgraph, resetSnapshotState } from './intelgraph-client';
 import { clearWorkspaceCache, getCacheStats } from './relation-cache';
 import { startMockMcpServer } from '../../test/mock-mcp-server';
 
@@ -12,7 +12,8 @@ afterEach(() => {
   for (const dir of cleanup.splice(0, cleanup.length)) {
     rmSync(dir, { recursive: true, force: true });
   }
-  delete process.env.CLANGD_MCP_URL;
+  delete process.env.INTELGRAPH_URL;
+  resetSnapshotState();
 });
 
 function makeTempWorkspace(): string {
@@ -31,25 +32,23 @@ describe('relation-cache integration', () => {
           if (ch <= 2) return 'No hover information available.';
           return 'function my_function';
         }
-        if (name === 'lsp_indirect_callers') {
-          return [
-            'Callers of my_function  (1 total: 1 registration-call)',
-            '',
-            'Registration-call registrations (1):',
-            '  <- [Function] caller_a  at src/caller.c:10:5',
-            '     via: register_handler',
-          ].join('\n');
-        }
-        if (name === 'lsp_incoming_calls') {
-          return 'No callers found.';
-        }
-        if (name === 'lsp_outgoing_calls') {
-          return 'No outgoing calls.';
+        if (name === 'get_callers') {
+          return JSON.stringify({
+            targetApi: 'my_function',
+            targetFile: 'src/test.c',
+            targetLine: 1,
+            callers: [
+              { name: 'caller_a', filePath: 'src/caller.c', lineNumber: 10, callerRole: 'direct_caller', invocationType: 'direct_call', confidence: 1, source: 'lsp_incoming_calls' },
+            ],
+            registrars: [],
+            source: 'get_callers',
+            provenance: { stepsAttempted: ['get_callers'], stepUsed: 'get_callers' },
+          });
         }
         return `Unknown tool: ${name}`;
       },
     });
-    process.env.CLANGD_MCP_URL = mock.url;
+    process.env.INTELGRAPH_URL = mock.url;
 
     const ws = makeTempWorkspace();
     const file = join(ws, 'src', 'test.c');
@@ -63,7 +62,7 @@ describe('relation-cache integration', () => {
     const statsBefore = getCacheStats(ws);
     expect(statsBefore.entryCount).toBe(0);
 
-    const result = await fetchRelationsFromClangdMcp({
+    const result = await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file,
       line: 1,
@@ -72,7 +71,7 @@ describe('relation-cache integration', () => {
     });
 
     expect(result.mode).toBe('incoming');
-    expect(result.provider).toBe('clangd-mcp');
+    expect(result.provider).toBe('intelgraph');
     const rootKey = Object.keys(result.result || {})[0];
     expect(rootKey).toBe('my_function');
 
@@ -83,8 +82,7 @@ describe('relation-cache integration', () => {
   });
 
   test('cache hit: second identical query returns cached payload without MCP calls', async () => {
-    let indirectCallersCount = 0;
-    let incomingCallsCount = 0;
+    let intelligenceQueryCount = 0;
     const mock = await startMockMcpServer({
       onToolCall: (name, args) => {
         if (name === 'lsp_hover') {
@@ -92,27 +90,24 @@ describe('relation-cache integration', () => {
           if (ch <= 2) return 'No hover information available.';
           return 'function my_function';
         }
-        if (name === 'lsp_indirect_callers') {
-          indirectCallersCount++;
-          return [
-            'Callers of my_function  (1 total: 1 registration-call)',
-            '',
-            'Registration-call registrations (1):',
-            '  <- [Function] caller_a  at src/caller.c:10:5',
-            '     via: register_handler',
-          ].join('\n');
-        }
-        if (name === 'lsp_incoming_calls') {
-          incomingCallsCount++;
-          return 'No callers found.';
-        }
-        if (name === 'lsp_outgoing_calls') {
-          return 'No outgoing calls.';
+        if (name === 'get_callers') {
+          intelligenceQueryCount++;
+          return JSON.stringify({
+            targetApi: 'my_function',
+            targetFile: 'src/test.c',
+            targetLine: 1,
+            callers: [
+              { name: 'caller_a', filePath: 'src/caller.c', lineNumber: 10, callerRole: 'direct_caller', invocationType: 'direct_call', confidence: 1, source: 'lsp_incoming_calls' },
+            ],
+            registrars: [],
+            source: 'get_callers',
+            provenance: { stepsAttempted: ['get_callers'], stepUsed: 'get_callers' },
+          });
         }
         return `Unknown tool: ${name}`;
       },
     });
-    process.env.CLANGD_MCP_URL = mock.url;
+    process.env.INTELGRAPH_URL = mock.url;
 
     const ws = makeTempWorkspace();
     const file = join(ws, 'src', 'test.c');
@@ -123,32 +118,28 @@ describe('relation-cache integration', () => {
     // Clear cache
     clearWorkspaceCache(ws);
 
-    // First query (cache miss) - should call lsp_indirect_callers and lsp_incoming_calls
-    indirectCallersCount = 0;
-    incomingCallsCount = 0;
-    const result1 = await fetchRelationsFromClangdMcp({
+    // First query (cache miss) - should call get_callers once
+    intelligenceQueryCount = 0;
+    const result1 = await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file,
       line: 1,
       character: 6,
       workspaceRoot: ws,
     });
-    expect(indirectCallersCount).toBe(1);
-    expect(incomingCallsCount).toBe(1);
+    expect(intelligenceQueryCount).toBe(1); // get_callers
 
-    // Second query (cache hit) - should NOT call lsp_indirect_callers or lsp_incoming_calls
+    // Second query (cache hit) - should NOT call intelligence_query
     // (lsp_hover is still called for symbol resolution, which is expected)
-    indirectCallersCount = 0;
-    incomingCallsCount = 0;
-    const result2 = await fetchRelationsFromClangdMcp({
+    intelligenceQueryCount = 0;
+    const result2 = await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file,
       line: 1,
       character: 6,
       workspaceRoot: ws,
     });
-    expect(indirectCallersCount).toBe(0); // Should NOT have called lsp_indirect_callers
-    expect(incomingCallsCount).toBe(0); // Should NOT have called lsp_incoming_calls
+    expect(intelligenceQueryCount).toBe(0); // Should NOT have called get_callers
 
     // Results should be identical
     expect(JSON.stringify(result1)).toBe(JSON.stringify(result2));
@@ -157,8 +148,15 @@ describe('relation-cache integration', () => {
   });
 
   test('cache invalidation: modified file triggers re-query', async () => {
-    let indirectCallersCount = 0;
-    let incomingCallsCount = 0;
+    let intelligenceQueryCount = 0;
+
+    // Create workspace first so we can use absolute paths in mock response
+    const ws = makeTempWorkspace();
+    const file = join(ws, 'src', 'test.c');
+    const callerFile = join(ws, 'src', 'caller.c');
+    writeFileSync(file, 'void my_function(void) {}\n', 'utf8');
+    writeFileSync(callerFile, 'void caller_a(void) {}\n', 'utf8');
+
     const mock = await startMockMcpServer({
       onToolCall: (name, args) => {
         if (name === 'lsp_hover') {
@@ -166,78 +164,63 @@ describe('relation-cache integration', () => {
           if (ch <= 2) return 'No hover information available.';
           return 'function my_function';
         }
-        if (name === 'lsp_indirect_callers') {
-          indirectCallersCount++;
-          return [
-            'Callers of my_function  (1 total: 1 registration-call)',
-            '',
-            'Registration-call registrations (1):',
-            '  <- [Function] caller_a  at src/caller.c:10:5',
-            '     via: register_handler',
-          ].join('\n');
-        }
-        if (name === 'lsp_incoming_calls') {
-          incomingCallsCount++;
-          return 'No callers found.';
-        }
-        if (name === 'lsp_outgoing_calls') {
-          return 'No outgoing calls.';
+        if (name === 'get_callers') {
+          intelligenceQueryCount++;
+          return JSON.stringify({
+            targetApi: 'my_function',
+            targetFile: file,
+            targetLine: 1,
+            callers: [
+              { name: 'caller_a', filePath: callerFile, lineNumber: 10, callerRole: 'direct_caller', invocationType: 'direct_call', confidence: 1, source: 'lsp_incoming_calls' },
+            ],
+            registrars: [],
+            source: 'get_callers',
+            provenance: { stepsAttempted: ['get_callers'], stepUsed: 'get_callers' },
+          });
         }
         return `Unknown tool: ${name}`;
       },
     });
-    process.env.CLANGD_MCP_URL = mock.url;
-
-    const ws = makeTempWorkspace();
-    const file = join(ws, 'src', 'test.c');
-    const callerFile = join(ws, 'src', 'caller.c');
-    writeFileSync(file, 'void my_function(void) {}\n', 'utf8');
-    writeFileSync(callerFile, 'void caller_a(void) {}\n', 'utf8');
+    process.env.INTELGRAPH_URL = mock.url;
 
     // Clear cache
     clearWorkspaceCache(ws);
 
-    // First query (cache miss)
-    indirectCallersCount = 0;
-    incomingCallsCount = 0;
-    await fetchRelationsFromClangdMcp({
+    // First query (cache miss) - calls get_callers once
+    intelligenceQueryCount = 0;
+    await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file,
       line: 1,
       character: 6,
       workspaceRoot: ws,
     });
-    expect(indirectCallersCount).toBe(1);
-    expect(incomingCallsCount).toBe(1);
+    expect(intelligenceQueryCount).toBe(1); // get_callers
 
     // Second query (cache hit)
-    indirectCallersCount = 0;
-    incomingCallsCount = 0;
-    await fetchRelationsFromClangdMcp({
+    intelligenceQueryCount = 0;
+    await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file,
       line: 1,
       character: 6,
       workspaceRoot: ws,
     });
-    expect(indirectCallersCount).toBe(0);
-    expect(incomingCallsCount).toBe(0);
+    expect(intelligenceQueryCount).toBe(0);
 
     // Modify evidence file
     writeFileSync(callerFile, 'void caller_a(void) { /* modified */ }\n', 'utf8');
 
     // Third query (cache invalidated, should re-query)
-    indirectCallersCount = 0;
-    incomingCallsCount = 0;
-    await fetchRelationsFromClangdMcp({
+    intelligenceQueryCount = 0;
+    await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file,
       line: 1,
       character: 6,
       workspaceRoot: ws,
     });
-    expect(indirectCallersCount).toBe(1); // Should have called lsp_indirect_callers again
-    expect(incomingCallsCount).toBe(1); // Should have called lsp_incoming_calls again
+    expect(intelligenceQueryCount).toBe(1); // Should have called get_callers again
 
     await mock.close();
   });
@@ -250,25 +233,23 @@ describe('relation-cache integration', () => {
           if (ch <= 2) return 'No hover information available.';
           return 'function my_function';
         }
-        if (name === 'lsp_indirect_callers') {
-          return [
-            'Callers of my_function  (1 total: 1 registration-call)',
-            '',
-            'Registration-call registrations (1):',
-            '  <- [Function] caller_a  at src/caller.c:10:5',
-            '     via: register_handler',
-          ].join('\n');
-        }
-        if (name === 'lsp_incoming_calls') {
-          return 'No callers found.';
-        }
-        if (name === 'lsp_outgoing_calls') {
-          return 'No outgoing calls.';
+        if (name === 'get_callers') {
+          return JSON.stringify({
+            targetApi: 'my_function',
+            targetFile: 'src/test.c',
+            targetLine: 1,
+            callers: [
+              { name: 'caller_a', filePath: 'src/caller.c', lineNumber: 10, callerRole: 'direct_caller', invocationType: 'direct_call', confidence: 1, source: 'lsp_incoming_calls' },
+            ],
+            registrars: [],
+            source: 'get_callers',
+            provenance: { stepsAttempted: ['get_callers'], stepUsed: 'get_callers' },
+          });
         }
         return `Unknown tool: ${name}`;
       },
     });
-    process.env.CLANGD_MCP_URL = mock.url;
+    process.env.INTELGRAPH_URL = mock.url;
 
     const ws1 = makeTempWorkspace();
     const ws2 = makeTempWorkspace();
@@ -288,7 +269,7 @@ describe('relation-cache integration', () => {
     clearWorkspaceCache(ws2);
 
     // Query workspace 1
-    await fetchRelationsFromClangdMcp({
+    await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file1,
       line: 1,
@@ -303,7 +284,7 @@ describe('relation-cache integration', () => {
     expect(stats2.entryCount).toBe(0); // Workspace 2 cache should be empty
 
     // Query workspace 2
-    await fetchRelationsFromClangdMcp({
+    await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file2,
       line: 1,
@@ -328,54 +309,25 @@ describe('relation-cache integration', () => {
           if (ch <= 2) return 'No hover information available.';
           return 'function my_handler';
         }
-        if (name === 'lsp_indirect_callers') {
-          const mediatedPaths = [
-            {
-              pathId: 'path-1',
-              endpoint: {
-                endpointKind: 'host_interface',
-                endpointId: 'WMI_CMD_ID',
-                endpointLabel: 'WMI Command',
-                origin: 'external(host)',
-                filePath: '/workspace/src/wmi.c',
-                lineNumber: 100,
-              },
-              stages: [
-                {
-                  stageKind: 'dispatch_table',
-                  ownerSymbol: 'wmi_dispatch',
-                  filePath: '/workspace/src/wmi.c',
-                  lineNumber: 100,
-                  ids: { eventId: 'WMI_CMD_ID' },
-                },
-              ],
-              confidence: { score: 0.9, reasons: ['explicit-endpoint-id'] },
-              evidence: [{ role: 'registration-site', filePath: '/workspace/src/wmi.c', lineNumber: 100 }],
-            },
-          ];
-
-          return [
-            'Callers of my_handler  (1 total)',
-            '',
-            'Registration-call registrations (1):',
-            '  <- [Function] wmi_register  at src/wmi.c:100:5',
-            '     via: wmi_unified_register_event_handler',
-            '',
-            '---mediated-paths-json---',
-            JSON.stringify(mediatedPaths, null, 2),
-            '---end-mediated-paths-json---',
-          ].join('\n');
-        }
-        if (name === 'lsp_incoming_calls') {
-          return 'No callers found.';
-        }
-        if (name === 'lsp_outgoing_calls') {
-          return 'No outgoing calls.';
+        if (name === 'get_callers') {
+          return JSON.stringify({
+            targetApi: 'my_handler',
+            targetFile: 'src/handler.c',
+            targetLine: 1,
+            callers: [
+              { name: 'WMI_CMD_ID', filePath: '/workspace/src/wmi.c', lineNumber: 100, callerRole: 'runtime_caller', invocationType: 'runtime_direct_call', confidence: 0.9, source: 'intelligence_query_runtime' },
+            ],
+            registrars: [
+              { name: 'wmi_register', filePath: 'src/wmi.c', lineNumber: 100, callerRole: 'registrar', invocationType: 'interface_registration', confidence: 0.8, source: 'intelligence_query_static' },
+            ],
+            source: 'get_callers',
+            provenance: { stepsAttempted: ['get_callers'], stepUsed: 'get_callers' },
+          });
         }
         return `Unknown tool: ${name}`;
       },
     });
-    process.env.CLANGD_MCP_URL = mock.url;
+    process.env.INTELGRAPH_URL = mock.url;
 
     const ws = makeTempWorkspace();
     const file = join(ws, 'src', 'handler.c');
@@ -387,7 +339,7 @@ describe('relation-cache integration', () => {
     clearWorkspaceCache(ws);
 
     // First query (cache miss)
-    const result1 = await fetchRelationsFromClangdMcp({
+    const result1 = await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file,
       line: 1,
@@ -397,12 +349,16 @@ describe('relation-cache integration', () => {
 
     const rootKey = Object.keys(result1.result || {})[0];
     const rootNode1 = result1.result?.[rootKey];
-    expect(rootNode1?.systemNodes).toBeDefined();
-    expect(rootNode1?.systemLinks).toBeDefined();
-    expect(rootNode1?.systemNodes?.length).toBeGreaterThan(0);
+    const calledBy1 = rootNode1?.calledBy ?? [];
+    expect(calledBy1.length).toBeGreaterThan(0);
+
+    // Verify callers are present
+    const wmiCaller = calledBy1.find((x) => x.caller === 'WMI_CMD_ID');
+    expect(wmiCaller).toBeDefined();
+    expect(wmiCaller?.connectionKind).toBe('api_call');
 
     // Second query (cache hit)
-    const result2 = await fetchRelationsFromClangdMcp({
+    const result2 = await fetchRelationsFromIntelgraph({
       mode: 'incoming',
       filePath: file,
       line: 1,
@@ -411,12 +367,10 @@ describe('relation-cache integration', () => {
     });
 
     const rootNode2 = result2.result?.[rootKey];
-    expect(rootNode2?.systemNodes).toBeDefined();
-    expect(rootNode2?.systemLinks).toBeDefined();
+    const calledBy2 = rootNode2?.calledBy ?? [];
 
-    // Verify systemNodes/systemLinks are identical
-    expect(JSON.stringify(rootNode1?.systemNodes)).toBe(JSON.stringify(rootNode2?.systemNodes));
-    expect(JSON.stringify(rootNode1?.systemLinks)).toBe(JSON.stringify(rootNode2?.systemLinks));
+    // Verify cached payload is identical
+    expect(JSON.stringify(calledBy1)).toBe(JSON.stringify(calledBy2));
 
     await mock.close();
   });

@@ -101,6 +101,8 @@ export function RelationWindow({
         outgoingItems={outgoingItems}
         requestExpand={requestExpand}
         requestHover={requestHover}
+        requestLogs={requestLogs}
+        requestStructWrites={requestStructWrites}
         onOpenLocation={onOpenLocation}
       />
     );

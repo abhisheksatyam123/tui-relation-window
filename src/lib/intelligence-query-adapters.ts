@@ -1,4 +1,4 @@
-import type { IntelligenceQueryResult } from './clangd-mcp-client';
+import type { IntelligenceQueryResult } from './intelgraph-client';
 
 export type LogRow = {
   level: string;
@@ -16,6 +16,34 @@ export type StructWriterRow = {
   confidence: number;
   derivation: string;
   accessPath?: string;
+};
+
+export type StructReaderRow = {
+  reader: string;
+  target: string;
+  edgeKind: string;
+  confidence: number;
+  derivation: string;
+  accessPath?: string;
+};
+
+export type ModuleRow = {
+  name: string;
+  filePath?: string;
+};
+
+export type ModuleSymbolRow = {
+  name: string;
+  kind?: string;
+  filePath?: string;
+  lineNumber?: number;
+};
+
+export type ClassRow = {
+  name: string;
+  filePath?: string;
+  lineNumber?: number;
+  kind?: string;
 };
 
 /**
@@ -45,5 +73,58 @@ export function queryResultToStructWriterRows(result: IntelligenceQueryResult): 
     accessPath: typeof n['current_api_runtime_structure_access_path_expression'] === 'string'
       ? n['current_api_runtime_structure_access_path_expression']
       : undefined,
+  }));
+}
+
+/**
+ * Convert find_api_struct_reads result into StructReaderRow[].
+ * Mirrors queryResultToStructWriterRows but reads from the reader-shaped fields.
+ */
+export function queryResultToStructReaderRows(result: IntelligenceQueryResult): StructReaderRow[] {
+  return result.data.nodes.map((n) => ({
+    reader: String(n['reader'] ?? n['writer'] ?? n['current_structure_runtime_reader_api_name'] ?? ''),
+    target: String(n['target'] ?? n['current_structure_runtime_target_structure_name'] ?? ''),
+    edgeKind: String(n['edge_kind'] ?? n['current_structure_runtime_structure_operation_type_classification'] ?? ''),
+    confidence: Number(n['confidence'] ?? n['current_structure_runtime_structure_operation_confidence_score'] ?? 0),
+    derivation: String(n['derivation'] ?? n['current_structure_runtime_relation_derivation_source'] ?? ''),
+    accessPath: typeof n['current_api_runtime_structure_access_path_expression'] === 'string'
+      ? n['current_api_runtime_structure_access_path_expression']
+      : undefined,
+  }));
+}
+
+/**
+ * Convert find_module_imports / find_module_dependents result into ModuleRow[].
+ * The TS extractor stores the canonical module name (e.g. "module:src/foo.ts").
+ */
+export function queryResultToModuleRows(result: IntelligenceQueryResult): ModuleRow[] {
+  return result.data.nodes.map((n) => ({
+    name: String(n['name'] ?? n['canonical_name'] ?? n['module'] ?? ''),
+    filePath: typeof n['file_path'] === 'string' ? n['file_path'] : undefined,
+  }));
+}
+
+/**
+ * Convert find_module_symbols result into ModuleSymbolRow[].
+ */
+export function queryResultToModuleSymbolRows(result: IntelligenceQueryResult): ModuleSymbolRow[] {
+  return result.data.nodes.map((n) => ({
+    name: String(n['name'] ?? n['canonical_name'] ?? ''),
+    kind: typeof n['kind'] === 'string' ? n['kind'] : undefined,
+    filePath: typeof n['file_path'] === 'string' ? n['file_path'] : undefined,
+    lineNumber: typeof n['line'] === 'number' ? n['line'] : undefined,
+  }));
+}
+
+/**
+ * Convert find_class_inheritance / find_class_subtypes / find_interface_implementors
+ * result into ClassRow[].
+ */
+export function queryResultToClassRows(result: IntelligenceQueryResult): ClassRow[] {
+  return result.data.nodes.map((n) => ({
+    name: String(n['name'] ?? n['canonical_name'] ?? ''),
+    filePath: typeof n['file_path'] === 'string' ? n['file_path'] : undefined,
+    lineNumber: typeof n['line'] === 'number' ? n['line'] : undefined,
+    kind: typeof n['kind'] === 'string' ? n['kind'] : undefined,
   }));
 }

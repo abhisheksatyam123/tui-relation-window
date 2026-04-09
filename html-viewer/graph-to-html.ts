@@ -13,7 +13,7 @@
  *
  * SEPARATION OF CONCERNS:
  * - Backend (extraction, schema, query intents, MCP tools) lives
- *   in /home/abhi/qprojects/clangd-mcp (intelgraph repo).
+ *   in /home/abhi/qprojects/intelgraph (intelgraph repo).
  * - All frontend / UI code (this file, the inlined HTML/CSS/JS,
  *   the tests) lives here in tui-relation-window.
  * - The contract between them is the GraphJson shape declared
@@ -31,7 +31,7 @@
  * GraphJson — node-link graph shape produced by intelgraph's
  * `loadGraphJsonFromDb`. This must stay in sync with the backend's
  * declaration in
- *   /home/abhi/qprojects/clangd-mcp/src/intelligence/db/sqlite/graph-export.ts
+ *   /home/abhi/qprojects/intelgraph/src/intelligence/db/sqlite/graph-export.ts
  *
  * The viewer is purely a renderer of this shape; if the backend
  * adds new fields, this type can be extended optionally without

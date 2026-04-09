@@ -21,7 +21,7 @@ import {
  * Normalise a workspace root path.
  * If the path ends with a VCS marker directory (.git, .hg, .svn) AND that
  * path is a directory on disk, return its parent instead.
- * This is the single source of truth inside clangd-mcp-client.ts.
+ * This is the single source of truth inside intelgraph-client.ts.
  */
 export function normaliseWorkspaceRoot(rawRoot: string): string {
   const resolved = resolve(rawRoot);
@@ -75,7 +75,7 @@ const SYMBOL_KIND_MAP: Record<string, number> = {
   TypeParameter: 26,
 };
 
-export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<BackendRelationPayload> {
+export async function fetchRelationsFromIntelgraph(query: BackendQuery): Promise<BackendRelationPayload> {
   const workspaceRoot = query.workspaceRoot ? resolve(query.workspaceRoot) : findWorkspaceRoot(query.filePath);
   const mcpUrl = normalizeMcpUrl(query.mcpUrl || (await resolveMcpUrl(workspaceRoot)));
   await ensureSnapshotInitializedForWorkspace(workspaceRoot, mcpUrl);
@@ -144,233 +144,38 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
     logWarn('backend', 'cache disabled while index not ready', { symbol: root.name });
   }
 
-  // ── CACHE MISS: runtime-first incoming query path ──
+  // ── CACHE MISS: single incoming API path (get_callers) ──
   if (query.mode === 'incoming') {
     let calledBy: CallerNode[] = [];
-    
-    // Step 0: Try get_callers — unified single-endpoint that runs the full waterfall internally.
-    // Returns structured JSON with callers[] (runtime) + registrars[] (registration points).
-    // Falls back to the manual waterfall if get_callers is unavailable or returns empty.
-    try {
-      const getCallersText = await callTool(mcpUrl, sessionId, 'get_callers', {
-        file: resolved.point.file,
-        line: resolved.point.line,
-        character: resolved.point.character,
-        snapshotId: getResolvedSnapshotId(workspaceRoot) > 0
-          ? getResolvedSnapshotId(workspaceRoot)
-          : undefined,
-        maxNodes: 50,
-        resolve: true,
-      });
-      const getCallersResult = parseGetCallersResponse(getCallersText, workspaceRoot);
-      if (getCallersResult.length > 0) {
-        calledBy = getCallersResult;
-        logInfo('backend', 'get-callers-success', {
-          rootName: root.name,
-          callerCount: calledBy.length,
-          source: 'get_callers',
-        });
-        // Skip the manual waterfall — get_callers already ran it internally
-        calledBy = rankIncomingCallers(dedupeIncomingByCanonicalCaller(calledBy));
-        const payload: BackendRelationPayload = {
-          mode: 'incoming',
-          provider: 'clangd-mcp',
-          result: {
-            [root.name]: {
-              symbolKind: root.symbolKind,
-              filePath: resolved.point.file,
-              lineNumber: resolved.point.line,
-              character: resolved.point.character,
-              calledBy,
-            },
-          },
-        };
-        const evidenceFiles = extractEvidenceFiles(payload);
-        if (cacheAllowed) {
-          storeCache(db, cacheKey, cacheQuery, payload, evidenceFiles);
-        }
-        db.close();
-        return payload;
-      }
-    } catch {
-      // get_callers not available or returned empty — fall through to manual waterfall
-    }
+    const getCallersText = await callTool(mcpUrl, sessionId, 'get_callers', {
+      file: resolved.point.file,
+      line: resolved.point.line,
+      character: resolved.point.character,
+      snapshotId: getResolvedSnapshotId(workspaceRoot) > 0
+        ? getResolvedSnapshotId(workspaceRoot)
+        : undefined,
+      maxNodes: 50,
+      resolve: true,
+    });
+    calledBy = parseGetCallersResponse(getCallersText, workspaceRoot);
+    logInfo('backend', 'get-callers-success', {
+      rootName: root.name,
+      callerCount: calledBy.length,
+      source: 'get_callers',
+    });
 
-    // Runtime-first strategy: try lsp_runtime_flow first for runtime observation
-    try {
-      const runtimeFlowText = await callTool(mcpUrl, sessionId, 'lsp_runtime_flow', {
-        file: resolved.point.file,
-        line: resolved.point.line,
-        character: resolved.point.character,
-        targetSymbol: root.name,
-        workspaceRoot,
-      });
-      const runtimeCallers = parseRuntimeFlowToCallers(runtimeFlowText, workspaceRoot)
-        .filter(isUsableIncomingCaller);
-      if (runtimeCallers.length > 0) {
-        calledBy = runtimeCallers;
-        logInfo('backend', 'runtime-flow-query-success', {
-          rootName: root.name,
-          callerCount: calledBy.length,
-        });
-      } else {
-        throw new Error('lsp_runtime_flow returned no runtime callers');
-      }
-    } catch (runtimeError) {
-      // Fallback to intelligence_query: try runtime graph first, then static graph
-      // Only attempt intelligence_query if a snapshot is available (snapshotId > 0)
-      const availableSnapshotId = getResolvedSnapshotId(workspaceRoot);
-      try {
-        if (availableSnapshotId <= 0) {
-          throw new Error('no snapshot available — skipping intelligence_query');
-        }
-        // Try who_calls_api_at_runtime for richer invocation type data
-        // Use alias variants so ___RAM and leading-_ variants are also checked
-        let queryResult: IntelligenceQueryResult;
-        let usedRuntimeQuery = false;
-        try {
-          queryResult = await intelligenceQueryWithAliases({
-            workspaceRoot,
-            intent: 'who_calls_api_at_runtime',
-            params: {
-              symbol: root.name,
-              filePath: resolved.point.file,
-              lineNumber: resolved.point.line,
-              maxNodes: 50,
-            },
-            snapshotId: getResolvedSnapshotId(workspaceRoot),
-            mcpUrl,
-          }, workspaceRoot, mcpUrl);
-          if (
-            queryResult.status === 'not_found' ||
-            queryResult.status === 'error' ||
-            queryResult.data.nodes.length === 0
-          ) {
-            throw new Error('no runtime callers from who_calls_api_at_runtime');
-          }
-          calledBy = queryResultToRuntimeCallerNodes(queryResult)
-            .filter(isUsableIncomingCaller);
-          if (calledBy.length === 0) {
-            throw new Error('who_calls_api_at_runtime returned no parseable runtime callers — falling back to static graph');
-          }
-          usedRuntimeQuery = true;
-        } catch {
-          // Fall back to static who_calls_api (also with alias variants)
-          queryResult = await intelligenceQueryWithAliases({
-            workspaceRoot,
-            intent: 'who_calls_api',
-            params: {
-              symbol: root.name,
-              filePath: resolved.point.file,
-              lineNumber: resolved.point.line,
-              maxNodes: 50,
-            },
-            snapshotId: getResolvedSnapshotId(workspaceRoot),
-            mcpUrl,
-          }, workspaceRoot, mcpUrl);
-          calledBy = queryResultToCallerNodes(queryResult);
-        }
-        if (!usedRuntimeQuery) {
-          // Static graph was used — augment with lsp_indirect_callers (resolve:true)
-          // to add the actual runtime dispatch function names alongside the registrars.
-          // This gives the user both: the registrar (who wired it) AND the dispatcher (who calls it).
-          try {
-            const indirectText = await callTool(mcpUrl, sessionId, 'lsp_indirect_callers', {
-              file: resolved.point.file,
-              line: resolved.point.line,
-              character: resolved.point.character,
-              maxNodes: 50,
-              resolve: true,  // resolve:true gets dispatch chain → actual runtime invoker name
-            });
-            const parsed = parseIndirectCallers(
-              indirectText,
-              workspaceRoot,
-              root.name,
-              resolved.point.file,
-              resolved.point.line,
-            );
-            if (parsed.calledBy.length > 0) {
-              calledBy = mergeIncomingSources(calledBy, parsed.calledBy);
-            } else if (calledBy.length === 0) {
-              // No callers at all — fall back to lsp_incoming_calls
-              throw new Error('lsp_indirect_callers returned no callers — falling back to lsp_incoming_calls');
-            }
-          } catch {
-            if (calledBy.length === 0) {
-              // Still nothing — try lsp_incoming_calls as last resort
-              const incomingText = await callTool(mcpUrl, sessionId, 'lsp_incoming_calls', {
-                file: resolved.point.file,
-                line: resolved.point.line,
-                character: resolved.point.character,
-              });
-              calledBy = mergeIncomingSources(calledBy, parseIncomingCalls(incomingText, workspaceRoot));
-            }
-          }
-        }
-        logInfo('backend', 'intelligence-query-who-calls-api-fallback', {
-          rootName: root.name,
-          status: queryResult.status,
-          callerCount: calledBy.length,
-          usedRuntimeQuery,
-          runtimeError: runtimeError instanceof Error ? runtimeError.message : String(runtimeError),
-        });
-      } catch (error) {
-        // Last resort: use lsp_indirect_callers which finds BOTH direct and indirect callers
-        // (fn-ptr callbacks, dispatch table entries, registration patterns).
-        // This is richer than lsp_incoming_calls which only finds direct callers.
-        try {
-          const indirectText = await callTool(mcpUrl, sessionId, 'lsp_indirect_callers', {
-            file: resolved.point.file,
-            line: resolved.point.line,
-            character: resolved.point.character,
-            maxNodes: 50,
-            resolve: true,  // resolve:true gets dispatch chain → actual runtime invoker name
-          });
-          const parsed = parseIndirectCallers(
-            indirectText,
-            workspaceRoot,
-            root.name,
-            resolved.point.file,
-            resolved.point.line,
-          );
-          calledBy = parsed.calledBy;
-          logWarn('backend', 'all-db-queries-failed-using-lsp-indirect-callers', {
-            rootName: root.name,
-            callerCount: calledBy.length,
-            runtimeError: runtimeError instanceof Error ? runtimeError.message : String(runtimeError),
-            intelligenceError: error instanceof Error ? error.message : String(error),
-          });
-        } catch (indirectError) {
-          // Final fallback: lsp_incoming_calls (direct callers only)
-          const text = await callTool(mcpUrl, sessionId, 'lsp_incoming_calls', {
-            file: resolved.point.file,
-            line: resolved.point.line,
-            character: resolved.point.character,
-          });
-          calledBy = parseIncomingCalls(text, workspaceRoot);
-          logWarn('backend', 'all-incoming-queries-failed-using-lsp-fallback', {
-            rootName: root.name,
-            callerCount: calledBy.length,
-            runtimeError: runtimeError instanceof Error ? runtimeError.message : String(runtimeError),
-            intelligenceError: error instanceof Error ? error.message : String(error),
-            indirectError: indirectError instanceof Error ? indirectError.message : String(indirectError),
-          });
-        }
-      }
-    }
-
-    calledBy = rankIncomingCallers(dedupeIncomingByCanonicalCaller(calledBy))
+    calledBy = reclassifyRegistrationLikeCallers(
+      rankIncomingCallers(dedupeIncomingByCanonicalCaller(calledBy)),
+      root.name,
+    )
       .filter(isUsableIncomingCaller);
 
-    // Show BOTH runtime callers AND registrars in the tree.
-    // The TUI distinguishes them by connectionKind:
-    //   api_call / hw_interrupt / ring_signal / timer_callback → runtime caller (◀── caller)
-    //   interface_registration                                  → registrar    (◀── [REG] via X)
-    // No filtering here — the UI renders the distinction visually.
+    // Single backend contract: get_callers returns runtime callers + registrars.
+    // We preserve both and let the UI render role via connection kind/badges.
 
     const payload: BackendRelationPayload = {
       mode: 'incoming',
-      provider: 'clangd-mcp',
+      provider: 'intelgraph',
       result: {
         [root.name]: {
           symbolKind: root.symbolKind,
@@ -432,7 +237,7 @@ export async function fetchRelationsFromClangdMcp(query: BackendQuery): Promise<
 
   const payload: BackendRelationPayload = {
     mode: 'outgoing',
-    provider: 'clangd-mcp',
+    provider: 'intelgraph',
     result: {
       [root.name]: {
         symbolKind: root.symbolKind,
@@ -466,57 +271,6 @@ async function isIndexReadyForCache(mcpUrl: string, sessionId: string): Promise<
   }
 }
 
-/**
- * Parse lsp_runtime_flow JSON output into CallerNode[].
- * Extracts immediateInvoker from each runtimeFlow as the runtime caller.
- */
-function parseRuntimeFlowToCallers(
-  text: string,
-  workspaceRoot: string,
-): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
-  try {
-    const payload = JSON.parse(text) as {
-      targetApi: string;
-      runtimeFlows: Array<{
-        targetApi: string;
-        runtimeTrigger: string;
-        dispatchChain: string[];
-        dispatchSite?: { symbol: string; filePath: string; lineNumber: number };
-        immediateInvoker: string;
-      }>;
-    };
-
-    const out: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> = [];
-    const seen = new Set<string>();
-
-    for (const flow of payload.runtimeFlows) {
-      if (!flow.immediateInvoker) continue;
-
-      const caller = preferSymbolAlias(flow.immediateInvoker);
-      const filePath = flow.dispatchSite?.filePath ?? '';
-      const lineNumber = flow.dispatchSite?.lineNumber ?? 0;
-      const key = `${caller}|${filePath}|${lineNumber}`;
-
-      if (seen.has(key)) continue;
-      seen.add(key);
-
-      out.push({
-        caller,
-        filePath: isAbsolute(filePath) ? filePath : join(workspaceRoot, filePath),
-        lineNumber,
-        symbolKind: 12, // Function
-        connectionKind: 'api_call',
-      });
-    }
-
-    return out;
-  } catch (error) {
-    logWarn('backend', 'parseRuntimeFlowToCallers failed', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return [];
-  }
-}
 
 function isUnknownPlaceholderCallerName(name: string): boolean {
   const normalized = name.trim().toLowerCase();
@@ -536,6 +290,44 @@ function isUsableIncomingCaller(
   return !isUnknownPlaceholderCallerName(caller.caller);
 }
 
+function functionBodyRegistersTarget(
+  filePath: string,
+  functionStartLine: number,
+  targetName: string,
+): boolean {
+  try {
+    const lines = readFileSync(filePath, 'utf8').split(/\r?\n/);
+    const start = Math.max(0, functionStartLine - 1);
+    const end = Math.min(lines.length, start + 180);
+    const escapedTarget = targetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const targetRe = new RegExp(escapedTarget);
+    for (let i = start; i < end; i += 1) {
+      const line = lines[i] || '';
+      if (!/register|offldmgr_register|subscribe|attach|hook/i.test(line)) continue;
+      if (targetRe.test(line)) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function reclassifyRegistrationLikeCallers(
+  callers: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]>,
+  targetName: string,
+): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
+  return callers.map((entry) => {
+    if (entry.connectionKind !== 'api_call') return entry;
+    if (!entry.filePath || !entry.lineNumber || entry.lineNumber <= 0) return entry;
+    if (!functionBodyRegistersTarget(entry.filePath, entry.lineNumber, targetName)) return entry;
+    return {
+      ...entry,
+      connectionKind: 'interface_registration' as const,
+      viaRegistrationApi: entry.viaRegistrationApi ?? entry.caller,
+    };
+  });
+}
+
 /**
  * Parse the unified get_callers response into CallerNode[].
  * 
@@ -553,7 +345,22 @@ function parseGetCallersResponse(
   workspaceRoot: string,
 ): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
   try {
-    const response = JSON.parse(text) as {
+    const parseLooseJsonObject = (raw: string): unknown => {
+      const trimmed = raw.trim();
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        // Some MCP deployments prepend banner/help text before JSON.
+        const firstBrace = trimmed.indexOf('{');
+        const lastBrace = trimmed.lastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace) {
+          return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+        }
+        throw new Error('no JSON object found in get_callers response');
+      }
+    };
+
+    const response = parseLooseJsonObject(text) as {
       targetApi: string;
       targetFile: string;
       targetLine: number;
@@ -655,7 +462,8 @@ function parseGetCallersResponse(
         lineNumber,
         symbolKind: 12, // Function
         connectionKind,
-        viaRegistrationApi: entry.name, // The registrar itself is the registration API
+        // Prefer explicit viaRegistrationApi from backend; fall back to registrar name
+        viaRegistrationApi: entry.viaRegistrationApi ?? entry.name,
       });
     }
 
@@ -668,101 +476,12 @@ function parseGetCallersResponse(
   }
 }
 
-function parseIncomingCalls(
-  text: string,
-  workspaceRoot: string,
-): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
-  const cleaned = stripIndexSuffix(text);
-  if (
-    cleaned.includes('No callers found') ||
-    cleaned.includes('No call hierarchy item') ||
-    cleaned.includes('No symbol found') ||
-    cleaned.includes('(none found)')
-  ) {
-    return [];
-  }
-
-  const out: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> = [];
-  for (const raw of cleaned.split('\n')) {
-    const line = raw.trimEnd();
-    const m = line.match(/^\s*<-\s+\[(\w+)\](?:\s+\[([^\]]+)\])?\s+(\S+)\s+at\s+(.*):(\d+):\d+\s*$/);
-    if (!m) continue;
-    const [, kind, tags, caller, relPath, lineStr] = m;
-    const tagText = (tags || '').toLowerCase();
-    const connectionKind: 'api_call' | 'interface_registration' =
-      tagText.includes('reg-call') ? 'interface_registration' : 'api_call';
-    out.push({
-      caller: preferSymbolAlias(caller),
-      filePath: isAbsolute(relPath) ? relPath : join(workspaceRoot, relPath),
-      lineNumber: Number(lineStr),
-      symbolKind: SYMBOL_KIND_MAP[kind] ?? 12,
-      connectionKind,
-    });
-  }
-  return out;
-}
-
-function mergeIncomingSources(
-  primary: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]>,
-  secondary: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]>,
-): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
-  if (!primary.length) return secondary;
-  if (!secondary.length) return primary;
-  const out = [...primary];
-  const seen = new Set(out.map((x) => `${preferSymbolAlias(x.caller)}|${x.connectionKind}|${x.filePath}|${x.lineNumber}`));
-  for (const item of secondary) {
-    const key = `${preferSymbolAlias(item.caller)}|${item.connectionKind}|${item.filePath}|${item.lineNumber}`;
-    if (seen.has(key)) continue;
-    out.push(item);
-    seen.add(key);
-  }
-  return out;
-}
-
-function hasNonTestCaller(
-  items: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]>
-): boolean {
-  return items.some((x) => !isLikelyTestPath(x.filePath));
-}
-
-function parseReferenceRegistrations(
-  text: string,
-  workspaceRoot: string,
-  targetName: string,
-  targetFile: string,
-  targetLine: number,
-): Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> {
-  const cleaned = stripIndexSuffix(text);
-  if (!cleaned || /No references|No symbol found|No call hierarchy item/i.test(cleaned)) return [];
-
-  const out: Array<NonNullable<NonNullable<BackendRelationPayload['result']>[string]['calledBy']>[number]> = [];
-  for (const raw of cleaned.split('\n')) {
-    const lineText = raw.trim();
-    const m = lineText.match(/^(?:-\s*)?(?<path>(?:file:\/\/)?[^:\s][^:]*?):(?<line>\d+):(?<col>\d+)\s*$/);
-    if (!m) continue;
-    const relPath = (m.groups?.path || '').replace(/^file:\/\//, '');
-    const lineStr = m.groups?.line || '0';
-    const filePath = isAbsolute(relPath) ? relPath : join(workspaceRoot, relPath);
-    const lineNumber = Number(lineStr);
-    if (resolve(filePath) === resolve(targetFile) && lineNumber === targetLine) continue;
-
-    const line = readLineSafe(filePath, lineNumber);
-    if (!line) continue;
-    if (!line.includes(targetName)) continue;
-    if (!/register|offldmgr_/i.test(line)) continue;
-
-    const owner = findEnclosingFunctionName(filePath, lineNumber) ?? basename(filePath);
-    const ownerLine = findEnclosingFunctionLine(filePath, lineNumber) ?? lineNumber;
-    out.push({
-      caller: preferSymbolAlias(owner),
-      filePath,
-      lineNumber: ownerLine,
-      symbolKind: 12,
-      connectionKind: 'interface_registration',
-    });
-  }
-  return out;
-}
+// Legacy incoming fallback parsers removed:
+// - parseRuntimeFlowToCallers
+// - parseIncomingCalls
+// - mergeIncomingSources
+// - parseReferenceRegistrations
+// Incoming path now exclusively uses backend get_callers.
 
 function readLineSafe(filePath: string, lineNumber: number): string {
   try {
@@ -813,7 +532,7 @@ function looksLikeFunctionDef(line: string): boolean {
   return /\b[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*\)\s*\{?\s*$/.test(s);
 }
 
-export async function doctorClangdMcp(query: BackendQuery): Promise<{
+export async function doctorIntelgraph(query: BackendQuery): Promise<{
   connected: boolean;
   workspaceRoot: string;
   mcpUrl: string;
@@ -916,7 +635,14 @@ export type IntelligenceQueryIntent =
   | 'find_api_struct_writes'
   | 'find_api_struct_reads'
   | 'current_structure_runtime_writers_of_structure'
-  | 'current_structure_runtime_readers_of_structure';
+  | 'current_structure_runtime_readers_of_structure'
+  // ── Language-agnostic structural intents (ts-core, future plugins) ──
+  | 'find_module_imports'
+  | 'find_module_dependents'
+  | 'find_module_symbols'
+  | 'find_class_inheritance'
+  | 'find_class_subtypes'
+  | 'find_interface_implementors';
 
 export type IntelligenceQueryArgs = {
   workspaceRoot: string;
@@ -988,7 +714,7 @@ async function ensureSnapshotInitializedInner(workspaceRoot: string, mcpUrl?: st
     const ingest = await ingestWorkspace({ workspaceRoot, mcpUrl });
     const snapshotId = ingest.snapshotId;
     if (!snapshotId || !Number.isFinite(snapshotId)) {
-      // Some clangd-mcp builds expose intelligence_query but do not emit a
+      // Some intelgraph builds expose intelligence_query but do not emit a
       // snapshot id in intelligence_ingest text output. Treat this as
       // non-blocking and continue in snapshotless mode.
       logWarn('backend', 'snapshot initialization continuing without snapshot id', {
@@ -1255,6 +981,136 @@ export async function queryStructWriters(args: {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Language-agnostic structural query helpers (used by ts-core graphs)
+//
+// These call the new structural intents added in intelgraph's
+// SqliteDbLookup so the TUI can show TS-shaped relationships:
+//   - module imports / dependents
+//   - module → declared symbols
+//   - class / interface inheritance
+//
+// They are agnostic about which plugin produced the underlying edges.
+// A future Python plugin emitting `imports` edges would surface here
+// with no client changes.
+// ---------------------------------------------------------------------------
+
+/**
+ * Query modules imported BY a given module.
+ * `moduleName` should be the canonical_name as stored in the graph,
+ * typically `module:relative/path/to/file.ts`.
+ */
+export async function queryModuleImports(args: {
+  workspaceRoot: string;
+  moduleName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_module_imports',
+    params: {
+      symbol: args.moduleName,
+      maxNodes: 200,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+/**
+ * Query modules that import a given module (the dependent set).
+ */
+export async function queryModuleDependents(args: {
+  workspaceRoot: string;
+  moduleName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_module_dependents',
+    params: {
+      symbol: args.moduleName,
+      maxNodes: 200,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+/**
+ * Query symbols declared in a given module (functions, classes, etc.).
+ */
+export async function queryModuleSymbols(args: {
+  workspaceRoot: string;
+  moduleName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_module_symbols',
+    params: {
+      symbol: args.moduleName,
+      maxNodes: 500,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+/**
+ * Query parent classes/interfaces this symbol extends.
+ */
+export async function queryClassInheritance(args: {
+  workspaceRoot: string;
+  className: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_class_inheritance',
+    params: {
+      symbol: args.className,
+      maxNodes: 100,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+/**
+ * Query subclasses / sub-interfaces of a given class or interface.
+ */
+export async function queryClassSubtypes(args: {
+  workspaceRoot: string;
+  className: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_class_subtypes',
+    params: {
+      symbol: args.className,
+      maxNodes: 200,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
+/**
+ * Query classes that implement a given interface.
+ */
+export async function queryInterfaceImplementors(args: {
+  workspaceRoot: string;
+  interfaceName: string;
+  mcpUrl?: string;
+}): Promise<IntelligenceQueryResult> {
+  return intelligenceQuery({
+    workspaceRoot: args.workspaceRoot,
+    intent: 'find_interface_implementors',
+    params: {
+      symbol: args.interfaceName,
+      maxNodes: 200,
+    },
+    mcpUrl: args.mcpUrl,
+  });
+}
+
 function parseIntelligenceQueryPayload(raw: string): Omit<IntelligenceQueryResult, 'raw'> {
   const payloadText = extractJsonObject(raw);
   const parsed = JSON.parse(payloadText) as {
@@ -1306,7 +1162,7 @@ function queryEdgeKindToConnectionKind(kind: unknown): SystemConnectionKind {
  * Map a backend EdgeKind (from intelligence_query GraphEdge.kind) to a
  * BackendConnectionKind for the UI.
  *
- * EdgeKind values are defined in clangd-mcp/src/intelligence/contracts/common.ts.
+ * EdgeKind values are defined in intelgraph/src/intelligence/contracts/common.ts.
  * BackendConnectionKind values are defined in backend-types.ts.
  *
  * Handles two cases:
@@ -1340,6 +1196,12 @@ export function edgeKindToConnectionKind(kind: string): BackendConnectionKind {
     case 'uses_macro':         return 'custom';
     case 'logs_event':         return 'event';
     case 'operates_on_struct': return 'custom';
+    // ── Language-agnostic structural edges (ts-core, future plugins) ─
+    case 'imports':            return 'interface_registration';  // module → module
+    case 'contains':           return 'custom';                  // module → symbol
+    case 'extends':            return 'interface_registration';  // class extends class
+    case 'implements':         return 'interface_registration';  // class implements iface
+    case 'references_type':    return 'custom';
     // BackendConnectionKind passthrough values (already in UI form)
     case 'api_call':               return 'api_call';
     case 'interface_registration': return 'interface_registration';
@@ -1573,6 +1435,7 @@ function findWorkspaceRoot(filePath: string): string {
 
   while (true) {
     if (
+      existsSync(join(current, '.intelgraph-state.json')) ||
       existsSync(join(current, '.clangd-mcp-state.json')) ||
       existsSync(join(current, '.clangd-mcp.json')) ||
       existsSync(join(current, '.git'))
@@ -1588,16 +1451,29 @@ function findWorkspaceRoot(filePath: string): string {
   }
 }
 
+// The intelgraph daemon (formerly clangd-mcp) writes its state to
+// .intelgraph-state.json on fresh runs and falls back to the legacy
+// .clangd-mcp-state.json only if it already exists. Match that order
+// here so the TUI keeps working across both names.
+function readDaemonState(root: string): { statePath: string; state: any } {
+  const newPath = join(root, '.intelgraph-state.json');
+  const newState = parseJsonFile(newPath);
+  if (newState) return { statePath: newPath, state: newState };
+  const legacyPath = join(root, '.clangd-mcp-state.json');
+  return { statePath: legacyPath, state: parseJsonFile(legacyPath) };
+}
+
 async function resolveMcpUrl(workspaceRoot: string): Promise<string> {
-  const envUrl = process.env.CLANGD_MCP_URL;
+  // INTELGRAPH_URL is the canonical name; CLANGD_MCP_URL is honoured as a
+  // fallback so existing shell configs and CI scripts keep working.
+  const envUrl = process.env.INTELGRAPH_URL ?? process.env.CLANGD_MCP_URL;
   if (envUrl && envUrl.trim()) {
     return envUrl.trim();
   }
 
   // Always normalise before reading the state file so we look in the right place
   const root = normaliseWorkspaceRoot(workspaceRoot);
-  const statePath = join(root, '.clangd-mcp-state.json');
-  let state = parseJsonFile(statePath);
+  let { statePath, state } = readDaemonState(root);
   let port = Number(state?.httpPort);
   if (Number.isFinite(port) && port > 0 && (await isPortOpen(port))) {
     logInfo('backend', 'mcp already live', { root, port });
@@ -1608,7 +1484,7 @@ async function resolveMcpUrl(workspaceRoot: string): Promise<string> {
   if (autoStartEnabled) {
     logInfo('backend', 'mcp not live, attempting auto-start', { root, statePath });
     await tryAutoStartMcp(root, state);
-    state = parseJsonFile(statePath);
+    ({ statePath, state } = readDaemonState(root));
     port = Number(state?.httpPort);
     if (Number.isFinite(port) && port > 0 && (await isPortOpen(port))) {
       logInfo('backend', 'mcp auto-start succeeded', { root, port });
@@ -1618,7 +1494,7 @@ async function resolveMcpUrl(workspaceRoot: string): Promise<string> {
   }
 
   throw new Error(
-    `Could not resolve clangd-mcp endpoint. Set CLANGD_MCP_URL or ensure ${statePath} contains httpPort.`
+    `Could not resolve intelgraph endpoint. Set INTELGRAPH_URL or ensure ${statePath} contains httpPort.`
   );
 }
 
@@ -1657,6 +1533,10 @@ async function tryAutoStartMcp(workspaceRoot: string, state: any) {
     cwd: root,
     detached: true,
     stdio: 'ignore',
+    env: {
+      ...process.env,
+      ...(process.env.INTELLIGENCE_POSTGRES_URL ? {} : { INTELLIGENCE_POSTGRES_URL: 'postgresql://localhost:5432/clangd_mcp' }),
+    },
   });
   child.unref();
 
@@ -1678,27 +1558,33 @@ function resolveBunBin(): string {
   return 'bun';
 }
 
-function resolveClangdMcpScript(): string {
-  // 1. Explicit env override
+function resolveIntelgraphScript(): string {
+  // 1. Explicit env override (new name preferred, legacy CLANGD_MCP_SCRIPT
+  //    still honoured so existing shell configs keep working).
+  if (process.env.INTELGRAPH_SCRIPT) return process.env.INTELGRAPH_SCRIPT;
   if (process.env.CLANGD_MCP_SCRIPT) return process.env.CLANGD_MCP_SCRIPT;
   // 2. Derive from the running script's location: this file lives at
-  //    <project>/src/lib/clangd-mcp-client.ts; the clangd-mcp sibling
-  //    project is expected at <project>/../clangd-mcp/dist/index.js
-  const siblingScript = join(
-    import.meta.dir,   // …/src/lib
-    '..', '..', '..', // up to workspace/qprojects
-    'clangd-mcp', 'dist', 'index.js',
-  );
-  if (existsSync(siblingScript)) return siblingScript;
+  //    <project>/src/lib/intelgraph-client.ts; the intelgraph sibling
+  //    project is expected at <project>/../intelgraph/dist/index.js (or
+  //    the legacy ../clangd-mcp/dist/index.js).
+  const here = import.meta.dir; // …/src/lib
+  const candidates = [
+    join(here, '..', '..', '..', 'intelgraph', 'dist', 'index.js'),
+    join(here, '..', '..', '..', 'clangd-mcp', 'dist', 'index.js'),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
   // 3. No script found — caller will surface a clear error
   throw new Error(
-    'Cannot locate clangd-mcp script. ' +
-    'Set CLANGD_MCP_SCRIPT=/path/to/clangd-mcp/dist/index.js or install clangd-mcp next to this project.',
+    'Cannot locate intelgraph script. ' +
+    'Set INTELGRAPH_SCRIPT=/path/to/intelgraph/dist/index.js or install intelgraph next to this project.',
   );
 }
 
 function resolveClangdBin(config: any, state: any): string {
-  // Priority: .clangd-mcp.json > state file > env > PATH candidates
+  // Priority: workspace config (.intelgraph.json / legacy .clangd-mcp.json)
+  // > state file > env > PATH candidates
   if (config?.clangd) return config.clangd;
   if (state?.clangdBin) return state.clangdBin;
   if (process.env.CLANGD_BIN) return process.env.CLANGD_BIN;
@@ -1718,8 +1604,13 @@ function resolveClangdBin(config: any, state: any): string {
 
 function buildAutoStartCommand(workspaceRoot: string, state: any): string[] {
   const bun    = resolveBunBin();
-  const script = resolveClangdMcpScript();
-  const config = parseJsonFile(join(workspaceRoot, '.clangd-mcp.json')) || {};
+  const script = resolveIntelgraphScript();
+  // Read the workspace config — prefer the new name, fall back to the
+  // legacy name so unmigrated workspaces still get their config picked up.
+  const config =
+    parseJsonFile(join(workspaceRoot, '.intelgraph.json')) ||
+    parseJsonFile(join(workspaceRoot, '.clangd-mcp.json')) ||
+    {};
 
   const clangdBin = resolveClangdBin(config, state);
   const clangdArgs: string[] = Array.isArray(config.args)
@@ -1743,10 +1634,9 @@ function buildAutoStartCommand(workspaceRoot: string, state: any): string[] {
 
 async function waitForHttpPort(workspaceRoot: string, timeoutMs: number): Promise<number | null> {
   const deadline = Date.now() + timeoutMs;
-  const statePath = join(workspaceRoot, '.clangd-mcp-state.json');
 
   while (Date.now() < deadline) {
-    const state = parseJsonFile(statePath);
+    const { state } = readDaemonState(workspaceRoot);
     const port = Number(state?.httpPort);
     if (Number.isFinite(port) && port > 0 && (await isPortOpen(port))) {
       return port;
@@ -1950,53 +1840,7 @@ function preferSymbolAlias(name: string): string {
   return canonical || trimmed;
 }
 
-/**
- * Build all alias variants of a symbol name for DB lookup.
- * C firmware often has the same function under multiple names:
- *   foo, _foo, __foo, foo___RAM, _foo___RAM
- * Returns the canonical name first, then variants.
- */
-function symbolAliasVariants(name: string): string[] {
-  const canonical = preferSymbolAlias(name);
-  const variants = new Set<string>([canonical]);
-  // Add leading-underscore variants
-  variants.add(`_${canonical}`);
-  variants.add(`__${canonical}`);
-  // Add ___RAM suffix variants (common in ROM-patched firmware)
-  variants.add(`${canonical}___RAM`);
-  variants.add(`_${canonical}___RAM`);
-  // Add the original name if different from canonical
-  if (name !== canonical) variants.add(name);
-  return [...variants];
-}
-
-/**
- * Try an intelligence_query with the canonical name first, then alias variants.
- * Returns the first result with data, or the last result if all return not_found.
- */
-async function intelligenceQueryWithAliases(
-  args: Omit<IntelligenceQueryArgs, 'params'> & { params: IntelligenceQueryArgs['params'] },
-  workspaceRoot: string,
-  mcpUrl: string | undefined,
-): Promise<IntelligenceQueryResult> {
-  const symbol = args.params.symbol ?? '';
-  const variants = symbolAliasVariants(symbol);
-
-  let lastResult: IntelligenceQueryResult | null = null;
-  for (const variant of variants) {
-    const result = await intelligenceQuery({
-      ...args,
-      params: { ...args.params, symbol: variant },
-      workspaceRoot,
-      mcpUrl,
-    });
-    if (result.status === 'hit' || result.status === 'enriched') {
-      return result;
-    }
-    lastResult = result;
-  }
-  return lastResult ?? { status: 'not_found', data: { nodes: [], edges: [] }, raw: '' };
-}
+// Legacy alias-walk query helpers removed for incoming mode migration.
 
 function isHoverUsable(firstLine: string): boolean {
   const lower = firstLine.toLowerCase();
@@ -2120,7 +1964,7 @@ type DerivedConnectionKind =
   | 'ring_completion'
   | 'custom';
 
-// ── Structured MediatedPath types (mirrors clangd-mcp trace-engine/trace-types) ──
+// ── Structured MediatedPath types (mirrors intelgraph trace-engine/trace-types) ──
 // These are the types emitted in the ---mediated-paths-json--- block.
 // Frontend consumes them without local inference.
 
@@ -2323,7 +2167,7 @@ function endpointKindToSystemNodeKind(endpointKind: string): import('./types').S
 }
 
 /**
- * Parse the plain-text output of the `lsp_indirect_callers` clangd-mcp tool
+ * Parse the plain-text output of the `lsp_indirect_callers` intelgraph tool
  * into a CallerNode array.
  *
  * Strategy (Gate G8):
@@ -2331,10 +2175,10 @@ function endpointKindToSystemNodeKind(endpointKind: string): import('./types').S
  *      If present, convert MediatedPath[] → CallerNode[] + systemNodes[] + systemLinks[].
  *      This is the primary path — backend semantics are preserved, no local inference.
  *   2. Fall back to text-annotation parsing when no JSON block is present.
- *      This preserves backward compatibility with older clangd-mcp versions.
+ *      This preserves backward compatibility with older intelgraph versions.
  *
  * Contract ownership:
- * - Backend (clangd-mcp) owns semantic classification.
+ * - Backend (intelgraph) owns semantic classification.
  * - Frontend parser only maps explicit backend labels to `connectionKind`.
  */
 function parseIndirectCallers(
@@ -2636,7 +2480,7 @@ function parseIndirectCallersFromText(
       continue;
     }
 
-    // Legacy clangd-mcp annotations are ignored; canonical contract is trigger-*.
+    // Legacy intelgraph annotations are ignored; canonical contract is trigger-*.
   }
 
   flush();

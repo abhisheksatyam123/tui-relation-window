@@ -6,6 +6,32 @@ import type {
 } from './types';
 import { buildSystemStructureFromPayload, type SystemStructureGraph } from './system-structure';
 
+/**
+ * Merges extra FlatRelationItem[] into base, deduplicating by label|filePath|lineNumber|relationType.
+ * Used to combine custom relations with normalized payload items.
+ */
+export function mergeFlatItems(base: FlatRelationItem[], extra: FlatRelationItem[]): FlatRelationItem[] {
+  if (extra.length === 0) return base;
+  const seen = new Set(base.map((item) => `${item.label}|${item.filePath}|${item.lineNumber}|${item.relationType}`));
+  const out = [...base];
+  for (const item of extra) {
+    const key = `${item.label}|${item.filePath}|${item.lineNumber}|${item.relationType}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+/**
+ * Normalizes a RelationPayload from the backend into a flat structure for rendering.
+ * 
+ * Runtime-only contract (TD-001):
+ * - Backend is responsible for filtering registration nodes from incoming callers
+ * - Frontend is a transparent pass-through layer that preserves all nodes and connectionKind
+ * - Frontend does NOT add filtering logic based on connectionKind
+ * - For incoming/both modes, backend should return only runtime callers (no interface_registration)
+ */
 export function normalizeRelationPayload(payload?: RelationPayload | null): {
   mode: 'incoming' | 'outgoing' | 'both';
   provider: string;
@@ -52,6 +78,13 @@ export function normalizeRelationPayload(payload?: RelationPayload | null): {
   };
 }
 
+/**
+ * Flattens incoming callers from rootNode.calledBy into FlatRelationItem array.
+ * 
+ * Passes through ALL callers including registrars (interface_registration).
+ * The TUI renders them with distinct [REG] badges.
+ * Preserves connectionKind and viaRegistrationApi exactly as provided by backend.
+ */
 function flattenIncoming(rootNode: RelationRootNode): FlatRelationItem[] {
   const items: FlatRelationItem[] = [];
   const calledBy = Array.isArray(rootNode.calledBy) ? rootNode.calledBy : [];
@@ -64,6 +97,7 @@ function flattenIncoming(rootNode: RelationRootNode): FlatRelationItem[] {
       relationType: 'incoming',
       symbolKind: caller.symbolKind,
       connectionKind: caller.connectionKind,
+      viaRegistrationApi: caller.viaRegistrationApi,
     });
   }
   return items;

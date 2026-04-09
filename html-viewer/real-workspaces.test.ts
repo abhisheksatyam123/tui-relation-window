@@ -11,7 +11,7 @@
  *   - /home/abhi/qprojects/openclaude     (TS, ~1900 files)
  *   - /home/abhi/qprojects/markdown-oxide             (Rust, ~67 files)
  *
- * The intelgraph CLI is also gated — if /home/abhi/qprojects/clangd-mcp
+ * The intelgraph CLI is also gated — if /home/abhi/qprojects/intelgraph
  * isn't on the host (e.g. in CI), the entire suite skips. The two
  * repos are intentionally decoupled, so this test only runs in the
  * developer environment that has both checked out.
@@ -34,7 +34,7 @@ import { fileURLToPath } from "node:url"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const renderScript = join(__dirname, "render.ts")
-const INTELGRAPH_DIR = "/home/abhi/qprojects/clangd-mcp"
+const INTELGRAPH_DIR = "/home/abhi/qprojects/intelgraph"
 const SNAPSHOT_STATS = join(INTELGRAPH_DIR, "src/bin/snapshot-stats.ts")
 
 const HAVE_INTELGRAPH = existsSync(SNAPSHOT_STATS)

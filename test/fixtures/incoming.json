@@ -1,6 +1,6 @@
 {
   "mode": "incoming",
-  "provider": "clangd-mcp",
+  "provider": "intelgraph",
   "result": {
     "main": {
       "symbolKind": 12,

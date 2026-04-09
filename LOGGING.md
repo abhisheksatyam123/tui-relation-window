@@ -197,9 +197,9 @@ The logs will show us exactly what's happening when you try to open the Relation
 # Backend logs
 ~/.local/share/tui-relation-window/logs/backend.log
 
-# clangd-mcp logs (per workspace)
-<workspace-root>/clangd-mcp.log
-<workspace-root>/clangd-mcp-bridge.log
+# intelgraph logs (per workspace)
+<workspace-root>/intelgraph.log
+<workspace-root>/intelgraph-bridge.log
 ```
 
 ---

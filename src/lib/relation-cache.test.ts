@@ -35,25 +35,22 @@ function makeTempWorkspace(): string {
 
 describe('relation-cache', () => {
   describe('getCacheDbPath', () => {
-    test('derives "CNG" slug for WLAN.CNG.* workspaces', () => {
+    test('stores cache DB at workspace root for WLAN workspaces', () => {
       const ws = '/workspace/WLAN.CNG.1.0-01880.3-QCACNGSWPL_V1_V2_SILICON-1';
       const dbPath = getCacheDbPath(ws);
-      expect(dbPath).toContain('/clangd-mcp/CNG/relation-cache.db');
+      expect(dbPath).toBe('/workspace/WLAN.CNG.1.0-01880.3-QCACNGSWPL_V1_V2_SILICON-1/relation-cache.db');
     });
 
-    test('derives project slug for WLAN.<PROJECT>.* workspaces', () => {
+    test('stores cache DB at workspace root for other WLAN workspaces', () => {
       const ws = '/workspace/WLAN.HELIUM.2.0-12345';
       const dbPath = getCacheDbPath(ws);
-      expect(dbPath).toContain('/clangd-mcp/HELIUM/relation-cache.db');
+      expect(dbPath).toBe('/workspace/WLAN.HELIUM.2.0-12345/relation-cache.db');
     });
 
-    test('uses hash for non-WLAN workspaces', () => {
+    test('stores cache DB at workspace root for non-WLAN workspaces', () => {
       const ws = '/workspace/my-project';
       const dbPath = getCacheDbPath(ws);
-      expect(dbPath).toContain('/clangd-mcp/');
-      expect(dbPath).toContain('/relation-cache.db');
-      expect(dbPath).not.toContain('/CNG/');
-      expect(dbPath).not.toContain('/WLAN/');
+      expect(dbPath).toBe('/workspace/my-project/relation-cache.db');
     });
   });
 
@@ -156,7 +153,7 @@ describe('relation-cache', () => {
     test('extracts all file paths from payload', () => {
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           my_function: {
             filePath: '/workspace/src/target.c',
@@ -184,7 +181,7 @@ describe('relation-cache', () => {
     test('deduplicates file paths', () => {
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           my_function: {
             filePath: '/workspace/src/target.c',
@@ -205,7 +202,7 @@ describe('relation-cache', () => {
     test('returns empty array for empty payload', () => {
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: null,
       };
 
@@ -241,7 +238,7 @@ describe('relation-cache', () => {
 
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           my_function: {
             filePath: join(ws, 'src', 'test.c'),
@@ -258,7 +255,7 @@ describe('relation-cache', () => {
 
       expect(cached).not.toBeNull();
       expect(cached?.payload.mode).toBe('incoming');
-      expect(cached?.payload.provider).toBe('clangd-mcp');
+      expect(cached?.payload.provider).toBe('intelgraph');
       expect(cached?.payload.result?.my_function?.calledBy?.length).toBe(1);
       db.close();
     });
@@ -283,7 +280,7 @@ describe('relation-cache', () => {
 
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           my_function: {
             filePath: file1,
@@ -323,7 +320,7 @@ describe('relation-cache', () => {
 
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           my_function: {
             filePath: file1,
@@ -361,7 +358,7 @@ describe('relation-cache', () => {
 
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           my_function: {
             filePath: join(ws, 'src', 'test.c'),
@@ -406,7 +403,7 @@ describe('relation-cache', () => {
 
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           test: {
             filePath: join(ws, 'src', 'test.c'),
@@ -449,7 +446,7 @@ describe('relation-cache', () => {
 
       const payload: BackendRelationPayload = {
         mode: 'incoming',
-        provider: 'clangd-mcp',
+        provider: 'intelgraph',
         result: {
           my_function: {
             filePath: join(ws, 'src', 'test.c'),

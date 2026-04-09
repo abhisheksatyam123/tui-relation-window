@@ -16,7 +16,7 @@
  *      without spinning up a JSDOM/d3 sandbox.
  *
  * Mirrors the coverage that lived in
- *   /home/abhi/qprojects/clangd-mcp/test/integration/snapshot-stats-cli.test.ts
+ *   /home/abhi/qprojects/intelgraph/test/integration/snapshot-stats-cli.test.ts
  * before the UI code was moved here for separation of concerns.
  */
 

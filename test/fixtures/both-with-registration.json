@@ -1,0 +1,50 @@
+{
+  "mode": "both",
+  "provider": "intelgraph",
+  "result": {
+    "target_api": {
+      "symbolKind": 12,
+      "filePath": "/path/to/target.c",
+      "lineNumber": 200,
+      "calledBy": [
+        {
+          "caller": "runtime_caller_1",
+          "filePath": "/path/to/runtime1.c",
+          "lineNumber": 100,
+          "symbolKind": 12,
+          "connectionKind": "api_call"
+        },
+        {
+          "caller": "runtime_caller_2",
+          "filePath": "/path/to/runtime2.c",
+          "lineNumber": 150,
+          "symbolKind": 12,
+          "connectionKind": "hw_interrupt"
+        },
+        {
+          "caller": "registration_point_1",
+          "filePath": "/path/to/register.c",
+          "lineNumber": 50,
+          "symbolKind": 12,
+          "connectionKind": "interface_registration"
+        },
+        {
+          "caller": "registration_point_2",
+          "filePath": "/path/to/init.c",
+          "lineNumber": 25,
+          "symbolKind": 12,
+          "connectionKind": "interface_registration"
+        }
+      ],
+      "calls": [
+        {
+          "callee": "downstream_api",
+          "filePath": "/path/to/downstream.c",
+          "lineNumber": 300,
+          "symbolKind": 12,
+          "connectionKind": "api_call"
+        }
+      ]
+    }
+  }
+}

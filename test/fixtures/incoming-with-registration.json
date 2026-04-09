@@ -1,0 +1,34 @@
+{
+  "mode": "incoming",
+  "provider": "intelgraph",
+  "result": {
+    "wlan_bpf_filter_offload_handler": {
+      "symbolKind": 12,
+      "filePath": "/path/to/wlan_bpf_filter_offload.c",
+      "lineNumber": 100,
+      "calledBy": [
+        {
+          "caller": "_offldmgr_enhanced_data_handler",
+          "filePath": "/path/to/offload_manager.c",
+          "lineNumber": 250,
+          "symbolKind": 12,
+          "connectionKind": "api_call"
+        },
+        {
+          "caller": "wlan_offload_mgr_register_handlers",
+          "filePath": "/path/to/offload_manager.c",
+          "lineNumber": 50,
+          "symbolKind": 12,
+          "connectionKind": "interface_registration"
+        },
+        {
+          "caller": "offload_init_table",
+          "filePath": "/path/to/offload_init.c",
+          "lineNumber": 75,
+          "symbolKind": 12,
+          "connectionKind": "interface_registration"
+        }
+      ]
+    }
+  }
+}
