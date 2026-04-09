@@ -1543,19 +1543,29 @@ async function tryAutoStartMcp(workspaceRoot: string, state: any) {
   await waitForHttpPort(root, 20000);
 }
 
-function resolveBunBin(): string {
+/**
+ * Resolve the Node.js binary to use for spawning the intelgraph daemon.
+ *
+ * IMPORTANT: We use Node.js (not Bun) because the intelgraph backend
+ * depends on better-sqlite3 (a native Node.js addon) which Bun doesn't
+ * support yet (https://github.com/oven-sh/bun/issues/4290). Running
+ * the daemon with Bun causes the intelligence SQLite backend to fail
+ * silently, making all intelligence_query calls return "backend not
+ * initialized" and the TUI to show "unknown_symbol" for TS/Rust files.
+ */
+function resolveNodeBin(): string {
   // 1. Explicit env override
-  if (process.env.BUN_BIN) return process.env.BUN_BIN;
-  // 2. Bun sets BUN_INSTALL at startup; use that if present
-  const bunInstall = process.env.BUN_INSTALL;
-  if (bunInstall) {
-    const candidate = join(bunInstall, 'bin', 'bun');
-    if (existsSync(candidate)) return candidate;
+  if (process.env.INTELGRAPH_NODE_BIN) return process.env.INTELGRAPH_NODE_BIN;
+  // 2. Try common node paths
+  const candidates = [
+    '/usr/bin/node',
+    '/usr/local/bin/node',
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
   }
-  // 3. process.execPath is the running bun binary itself
-  if (process.execPath && existsSync(process.execPath)) return process.execPath;
-  // 4. Fall back to PATH lookup
-  return 'bun';
+  // 3. PATH lookup
+  return 'node';
 }
 
 function resolveIntelgraphScript(): string {
@@ -1603,7 +1613,7 @@ function resolveClangdBin(config: any, state: any): string {
 }
 
 function buildAutoStartCommand(workspaceRoot: string, state: any): string[] {
-  const bun    = resolveBunBin();
+  const node   = resolveNodeBin();
   const script = resolveIntelgraphScript();
   // Read the workspace config — prefer the new name, fall back to the
   // legacy name so unmigrated workspaces still get their config picked up.
@@ -1620,7 +1630,7 @@ function buildAutoStartCommand(workspaceRoot: string, state: any): string[] {
       : ['--background-index', '--enable-config', '--log=error'];
 
   return [
-    bun,
+    node,
     script,
     '--http-daemon-mode',
     '--root',
