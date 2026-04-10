@@ -812,8 +812,56 @@ export function BothRelationWindow({
     }
   });
 
+  // ── Unified One Dark Pro palette ────────────────────────────────────────────
+  // Moved before getEdgeLineChar so C is initialized before first use.
+  const C = {
+    bgDeep:    '#1b1f27',  bgPanel:   '#21252b',  bgSel:     '#2c313a',  bgRoot:    '#1e2a1e',
+    fgBright:  '#ffffff',  fgDefault: '#abb2bf',  fgDim:     '#5c6370',  fgRoot:    '#a8d8a8',
+    fgLoading: '#e5c07b',  fgError:   '#e06c75',  fgOk:      '#98c379',
+    blue:      '#61afef',  green:     '#98c379',  yellow:    '#e5c07b',  purple:    '#c678dd',
+    cyan:      '#56b6c2',  red:       '#e06c75',
+    edgeCall:   '#4b5263',  edgeReg:    '#c678dd',  edgeThread: '#61afef',
+    edgeIrq:    '#e5c07b',  edgeRing:   '#56b6c2',  edgeEvent:  '#98c379',  edgeTimer:  '#d19a66',
+    sep:       '#3a3f4b',
+  } as const;
+
+  function nodeKindGlyph(node: { label: string; symbolKind?: number; edgeKindFromParent?: EdgeKind }): { glyph: string; color: string } {
+    const ek = node.edgeKindFromParent;
+    if (ek === 'hw_interrupt')                        return { glyph: '⚡', color: C.edgeIrq    };
+    if (ek === 'timer_callback')                      return { glyph: '⏱', color: C.edgeTimer   };
+    if (ek === 'sw_thread_comm')                      return { glyph: '⟳', color: C.edgeThread  };
+    if (ek === 'hw_ring' || ek === 'ring_signal')     return { glyph: '⬡', color: C.edgeRing    };
+    if (ek === 'event')                               return { glyph: '◈', color: C.edgeEvent   };
+    if (ek === 'interface_registration')              return { glyph: '⊕', color: C.edgeReg     };
+    switch (node.symbolKind) {
+      case 1:  return { glyph: '󰈙', color: C.fgDim    };
+      case 5:  return { glyph: 'ℂ', color: C.blue     };
+      case 6:  return { glyph: 'M', color: C.purple   };
+      case 9:  return { glyph: '⊕', color: C.yellow   };
+      case 10: return { glyph: 'E', color: C.yellow   };
+      case 11: return { glyph: 'I', color: C.blue     };
+      case 12: return { glyph: 'ƒ', color: C.cyan     };
+      case 13: return { glyph: '𝓥', color: C.green    };
+      case 23: return { glyph: 'S', color: C.yellow   };
+      default: return { glyph: 'ƒ', color: C.cyan     };
+    }
+  }
+
+  function edgeGlyphInfo(kind: EdgeKind): { line: string; junction: string; arrow: string; color: string } {
+    switch (kind) {
+      case 'interface_registration': return { line: '║', junction: '╣', arrow: '◀', color: C.edgeReg    };
+      case 'sw_thread_comm':        return { line: '┄', junction: '┤', arrow: '◀', color: C.edgeThread  };
+      case 'hw_interrupt':          return { line: '╎', junction: '┤', arrow: '◀', color: C.edgeIrq    };
+      case 'hw_ring':
+      case 'ring_signal':           return { line: '┉', junction: '┤', arrow: '◀', color: C.edgeRing   };
+      case 'event':                 return { line: '╌', junction: '┤', arrow: '◀', color: C.edgeEvent   };
+      case 'timer_callback':        return { line: '┈', junction: '┤', arrow: '◀', color: C.edgeTimer   };
+      case 'deferred_work':         return { line: '╌', junction: '┤', arrow: '◀', color: C.fgDim       };
+      default:                      return { line: '│', junction: '┤', arrow: '◀', color: C.edgeCall    };
+    }
+  }
+
   const getEdgeLineChar = (kind: EdgeKind): string => {
-    // Use the same glyphs as edgeGlyphInfo so the edge cells map matches the colors
     return edgeGlyphInfo(kind).line;
   };
 
@@ -920,87 +968,6 @@ export function BothRelationWindow({
   const sideError = graph.activeDirection === 'incoming' ? graph.incoming.error : graph.outgoing.error;
   const selectedNode = graph.nodes[graph.selectedId];
   const hoveredNode = hoveredNodeId ? graph.nodes[hoveredNodeId] : null;
-
-  // ── Unified One Dark Pro palette ────────────────────────────────────────────
-  // All colors reference this palette so the canvas is consistent with
-  // RelationComponents.tsx and the rest of the TUI.
-  const C = {
-    // Backgrounds
-    bgDeep:    '#1b1f27',  // canvas background
-    bgPanel:   '#21252b',  // header / footer / bars
-    bgSel:     '#2c313a',  // selected node highlight row
-    bgRoot:    '#1e2a1e',  // root node tint
-
-    // Text
-    fgBright:  '#ffffff',  // selected label
-    fgDefault: '#abb2bf',  // normal node label
-    fgDim:     '#5c6370',  // meta / file:line / separators
-    fgRoot:    '#a8d8a8',  // root node label (green tint)
-    fgLoading: '#e5c07b',  // amber spinner
-    fgError:   '#e06c75',  // red error
-    fgOk:      '#98c379',  // green ready
-
-    // Accents (One Dark Pro)
-    blue:      '#61afef',  // navigation keys, title
-    green:     '#98c379',  // callers / incoming badge
-    yellow:    '#e5c07b',  // callees / outgoing badge / timers
-    purple:    '#c678dd',  // registrations
-    cyan:      '#56b6c2',  // functions, rings
-    red:       '#e06c75',  // errors, quit
-
-    // Edge / glyph accent colors
-    edgeCall:   '#4b5263',  // direct call — subtle (most common)
-    edgeReg:    '#c678dd',  // registration — purple
-    edgeThread: '#61afef',  // thread comm — blue
-    edgeIrq:    '#e5c07b',  // interrupt — amber
-    edgeRing:   '#56b6c2',  // ring/DMA — cyan
-    edgeEvent:  '#98c379',  // signal/event — green
-    edgeTimer:  '#d19a66',  // timer — orange
-
-    // Canvas structural
-    sep:       '#3a3f4b',  // separator lines between sections
-  } as const;
-
-  // ── Node-kind symbol + color ─────────────────────────────────────────────
-  function nodeKindGlyph(node: { label: string; symbolKind?: number; edgeKindFromParent?: EdgeKind }): { glyph: string; color: string } {
-    // Edge-kind overrides (for indirect caller nodes the connection type is most informative)
-    const ek = node.edgeKindFromParent;
-    if (ek === 'hw_interrupt')                        return { glyph: '⚡', color: C.edgeIrq    };
-    if (ek === 'timer_callback')                      return { glyph: '⏱', color: C.edgeTimer   };
-    if (ek === 'sw_thread_comm')                      return { glyph: '⟳', color: C.edgeThread  };
-    if (ek === 'hw_ring' || ek === 'ring_signal')     return { glyph: '⬡', color: C.edgeRing    };
-    if (ek === 'event')                               return { glyph: '◈', color: C.edgeEvent   };
-    if (ek === 'interface_registration')              return { glyph: '⊕', color: C.edgeReg     };
-
-    // LSP symbol kind
-    switch (node.symbolKind) {
-      case 1:  return { glyph: '󰈙', color: C.fgDim    };  // File
-      case 5:  return { glyph: 'ℂ', color: C.blue     };  // Class
-      case 6:  return { glyph: 'M', color: C.purple   };  // Method
-      case 9:  return { glyph: '⊕', color: C.yellow   };  // Constructor
-      case 10: return { glyph: 'E', color: C.yellow   };  // Enum
-      case 11: return { glyph: 'I', color: C.blue     };  // Interface
-      case 12: return { glyph: 'ƒ', color: C.cyan     };  // Function
-      case 13: return { glyph: '𝓥', color: C.green    };  // Variable
-      case 23: return { glyph: 'S', color: C.yellow   };  // Struct
-      default: return { glyph: 'ƒ', color: C.cyan     };  // default: function
-    }
-  }
-
-  // Edge glyph + color per EdgeKind — all colors from C palette
-  function edgeGlyphInfo(kind: EdgeKind): { line: string; junction: string; arrow: string; color: string } {
-    switch (kind) {
-      case 'interface_registration': return { line: '║', junction: '╣', arrow: '◀', color: C.edgeReg    };
-      case 'sw_thread_comm':        return { line: '┄', junction: '┤', arrow: '◀', color: C.edgeThread  };
-      case 'hw_interrupt':          return { line: '╎', junction: '┤', arrow: '◀', color: C.edgeIrq    };
-      case 'hw_ring':
-      case 'ring_signal':           return { line: '┉', junction: '┤', arrow: '◀', color: C.edgeRing   };
-      case 'event':                 return { line: '╌', junction: '┤', arrow: '◀', color: C.edgeEvent   };
-      case 'timer_callback':        return { line: '┈', junction: '┤', arrow: '◀', color: C.edgeTimer   };
-      case 'deferred_work':         return { line: '╌', junction: '┤', arrow: '◀', color: C.fgDim       };
-      default:                      return { line: '│', junction: '┤', arrow: '◀', color: C.edgeCall    };
-    }
-  }
 
   // ── Structured canvas rows ─────────────────────────────────────────────────
   // Each row is an array of segments; each segment is {text, fg, bold}.

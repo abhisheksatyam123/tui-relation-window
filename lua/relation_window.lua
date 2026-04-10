@@ -1,4 +1,8 @@
-local plugin = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":h:h") .. "/nvim/relation_window.lua")
+-- Resolve the plugin root: try debug.getinfo path first, then fall back
+-- to vim.fn.resolve() to handle symlinked or remapped paths.
+local _raw_path = debug.getinfo(1, "S").source:sub(2)
+local _plugin_root = vim.fn.fnamemodify(vim.fn.resolve(_raw_path), ":h:h")
+local plugin = dofile(_plugin_root .. "/nvim/relation_window.lua")
 
 local commands_registered = false
 local setup_open_opts = {}
@@ -34,12 +38,14 @@ local function register_commands()
     return
   end
 
+  -- Deprecated: Incoming/Outgoing are kept as aliases for backwards
+  -- compatibility but always open in "both" mode now.
   vim.api.nvim_create_user_command("RelationWindowIncoming", function()
-    ensure_open("incoming")
+    ensure_open("both")
   end, {})
 
   vim.api.nvim_create_user_command("RelationWindowOutgoing", function()
-    ensure_open("outgoing")
+    ensure_open("both")
   end, {})
 
   vim.api.nvim_create_user_command("RelationWindowBoth", function()

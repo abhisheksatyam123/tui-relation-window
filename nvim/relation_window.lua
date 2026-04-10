@@ -280,11 +280,10 @@ local function stop_session_job(session, reason)
   session.job_id = nil
   log_debug("stopping session job", { id = session.id, job_id = job_id, reason = reason })
 
-  local ch = vim.fn.jobgetchannel(job_id)
-  if type(ch) == "number" and ch > 0 then
-    pcall(vim.fn.chanclose, ch, "stdin")
-  end
-
+  -- Close stdin channel to signal the TUI process to exit gracefully.
+  -- Neovim uses nvim_chan_send / chansend; there is no jobgetchannel.
+  pcall(vim.fn.chansend, job_id, "")
+  pcall(vim.fn.chanclose, job_id, "stdin")
   pcall(vim.fn.jobstop, job_id)
 end
 
@@ -1386,6 +1385,8 @@ function M.ping(id)
 end
 
 function M.set_mode(mode, id)
+  -- Deprecated: separate incoming/outgoing views removed. Always use "both".
+  -- Accept any valid mode string for backwards compat but force "both".
   if mode ~= "incoming" and mode ~= "outgoing" and mode ~= "both" then
     log_warn("set_mode: invalid mode", { mode = mode })
     return
@@ -1393,12 +1394,11 @@ function M.set_mode(mode, id)
 
   local _, session = get_session(id)
   if not session then
-    -- Keep mode sticky so subsequent refresh() can open with this mode.
-    M.state.default_mode = mode
+    M.state.default_mode = "both"
     return
   end
 
-  session.mode = mode
+  session.mode = "both"
 end
 
 function M.set_backend_retry(opts, id)
@@ -1478,16 +1478,15 @@ end
 
 -- SwitchMode: flip incoming↔outgoing for the active session and refresh (FEAT-006).
 function M.switch_mode(id)
-  log_info("M.switch_mode called", { id = id })
+  -- Deprecated: separate incoming/outgoing views removed. Always use "both".
+  log_info("M.switch_mode called (deprecated, always both)", { id = id })
   local _, session = get_session(id)
   if not session then
     log_warn("switch_mode: no active session", { id = id, active_id = M.state.active_id })
     return
   end
 
-  local old_mode = session.mode
-  session.mode = (session.mode == "incoming") and "outgoing" or "incoming"
-  log_info("switch_mode: mode changed", { id = id, old_mode = old_mode, new_mode = session.mode })
+  session.mode = "both"
   M.refresh(id)
 end
 
